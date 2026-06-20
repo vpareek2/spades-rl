@@ -122,6 +122,10 @@ uv run spades-train-puffer \
   --save-path checkpoints/spades_smoke.pt
 ```
 
+By default, PPO episodes terminate at Spades hand boundaries because the
+environment scores contracts per hand. Use `--match-episodes` to train across
+full multi-hand matches instead.
+
 Current Limitations
 -------------------
 

@@ -47,6 +47,7 @@ class SpadesPufferConfig:
     max_steps_per_match: int = 5000
     reward_scale: float = 0.01
     use_cuda_buffers: bool = False
+    hand_episodes: bool = True
 
 
 class SpadesPufferVecEnv:
@@ -88,9 +89,11 @@ class SpadesPufferVecEnv:
 
         self.completed_matches = 0
         self.completed_hands = 0
+        self.completed_episodes = 0
         self.illegal_actions = 0
         self.truncated_matches = 0
         self.total_steps = 0
+        self._recent_episode_returns: deque[float] = deque(maxlen=512)
         self._recent_match_returns: deque[float] = deque(maxlen=256)
         self._recent_hand_scores: deque[float] = deque(maxlen=512)
 
@@ -183,14 +186,23 @@ class SpadesPufferVecEnv:
                 self.completed_hands += 1
                 self._latest_scores[env_idx] = info["team_scores"]
                 self._latest_bags[env_idx] = info["team_bags"]
-                self._recent_hand_scores.append(float(np.mean(scaled_rewards)))
+                hand_score = float(np.mean(scaled_rewards))
+                self._recent_hand_scores.append(hand_score)
+                if self.config.hand_episodes:
+                    self.completed_episodes += 1
+                    self._recent_episode_returns.append(hand_score)
+                    self._terminals[base : base + self.num_agents] = 1.0
 
             timed_out = self._env_steps[env_idx] >= self.config.max_steps_per_match
             if terminated or truncated or timed_out:
                 self.completed_matches += 1
+                self.completed_episodes += 1
                 self.truncated_matches += int(timed_out and not terminated)
                 self._terminals[base : base + self.num_agents] = 1.0
-                self._recent_match_returns.append(float(np.mean(self._match_returns[env_idx])))
+                match_return = float(np.mean(self._match_returns[env_idx]))
+                self._recent_match_returns.append(match_return)
+                if not self.config.hand_episodes:
+                    self._recent_episode_returns.append(match_return)
                 env.reset(seed=self.config.seed + self.completed_matches * self.num_envs + env_idx)
                 self._env_steps[env_idx] = 0
                 self._match_returns[env_idx] = 0.0
@@ -222,11 +234,16 @@ class SpadesPufferVecEnv:
         return env_idx * self.num_agents + player
 
     def log(self) -> dict[str, float]:
+        mean_episode_return = (
+            float(np.mean(self._recent_episode_returns)) if self._recent_episode_returns else 0.0
+        )
         mean_match_return = float(np.mean(self._recent_match_returns)) if self._recent_match_returns else 0.0
         mean_hand_score = float(np.mean(self._recent_hand_scores)) if self._recent_hand_scores else 0.0
         return {
-            "score": mean_match_return,
+            "score": mean_episode_return,
             "hand_score": mean_hand_score,
+            "match_score": mean_match_return,
+            "completed_episodes": float(self.completed_episodes),
             "completed_matches": float(self.completed_matches),
             "completed_hands": float(self.completed_hands),
             "illegal_actions": float(self.illegal_actions),
@@ -354,6 +371,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps-per-match", type=int, default=5000)
     parser.add_argument("--reward-scale", type=float, default=0.01)
+    parser.add_argument("--hand-episodes", action="store_true", default=True)
+    parser.add_argument("--match-episodes", action="store_false", dest="hand_episodes")
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--log-dir", type=str, default="logs")
@@ -379,6 +398,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
             max_steps_per_match=cli_args.max_steps_per_match,
             reward_scale=cli_args.reward_scale,
             use_cuda_buffers=cli_args.cuda_buffers,
+            hand_episodes=cli_args.hand_episodes,
         )
     )
     args = build_train_args(cli_args)
@@ -400,12 +420,14 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                 print(
                     "epoch={epoch} steps={steps:.0f} sps={sps:.0f} "
                     "score={score:.4f} hand_score={hand_score:.4f} "
-                    "hands={hands:.0f} matches={matches:.0f} illegal={illegal:.0f}".format(
+                    "episodes={episodes:.0f} hands={hands:.0f} "
+                    "matches={matches:.0f} illegal={illegal:.0f}".format(
                         epoch=int(final_logs.get("epoch", trainer.epoch)),
                         steps=float(final_logs.get("agent_steps", trainer.global_step)),
                         sps=float(final_logs.get("SPS", 0.0)),
                         score=float(final_logs.get("env/score", 0.0)),
                         hand_score=float(final_logs.get("env/hand_score", 0.0)),
+                        episodes=float(final_logs.get("env/completed_episodes", 0.0)),
                         hands=float(final_logs.get("env/completed_hands", 0.0)),
                         matches=float(final_logs.get("env/completed_matches", 0.0)),
                         illegal=float(final_logs.get("env/illegal_actions", 0.0)),
