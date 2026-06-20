@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import os
 import time
 from collections import deque
@@ -357,6 +358,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--log-dir", type=str, default="logs")
     parser.add_argument("--save-path", type=str, default="")
+    parser.add_argument("--metrics-path", type=str, default="")
     parser.add_argument("--cuda-buffers", action="store_true", default=False)
     parser.add_argument("--cpu-buffers", action="store_false", dest="cuda_buffers")
     parser.add_argument("--anneal-lr", action="store_true", default=False)
@@ -397,12 +399,15 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                 final_logs = dict(pufferl.unroll_nested_dict(trainer.log()))
                 print(
                     "epoch={epoch} steps={steps:.0f} sps={sps:.0f} "
-                    "score={score:.4f} hands={hands:.0f} illegal={illegal:.0f}".format(
+                    "score={score:.4f} hand_score={hand_score:.4f} "
+                    "hands={hands:.0f} matches={matches:.0f} illegal={illegal:.0f}".format(
                         epoch=int(final_logs.get("epoch", trainer.epoch)),
                         steps=float(final_logs.get("agent_steps", trainer.global_step)),
                         sps=float(final_logs.get("SPS", 0.0)),
                         score=float(final_logs.get("env/score", 0.0)),
+                        hand_score=float(final_logs.get("env/hand_score", 0.0)),
                         hands=float(final_logs.get("env/completed_hands", 0.0)),
+                        matches=float(final_logs.get("env/completed_matches", 0.0)),
                         illegal=float(final_logs.get("env/illegal_actions", 0.0)),
                     ),
                     flush=True,
@@ -416,6 +421,10 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
 
     final_logs["model_path"] = cli_args.save_path
     final_logs["completed_at"] = time.time()
+    if cli_args.metrics_path:
+        os.makedirs(os.path.dirname(cli_args.metrics_path) or ".", exist_ok=True)
+        with open(cli_args.metrics_path, "w") as f:
+            json.dump(final_logs, f, indent=2, sort_keys=True)
     return final_logs
 
 

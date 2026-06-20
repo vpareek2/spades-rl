@@ -92,10 +92,41 @@ dealing, bidding/play phase transitions, scoring and bag penalties, controlled
 hands, history/debug APIs, rollout smoke tests, and Gymnasium/PettingZoo wrapper
 checks.
 
+PufferLib Training
+------------------
+
+The Spades training entrypoint uses PufferLib's PyTorch PPO backend with a Python
+vector environment and an action-masked policy:
+
+```bash
+uv run spades-train-puffer --help
+```
+
+On the GPU training box, build PufferLib's float32 backend first:
+
+```bash
+./scripts/build_pufferlib_float.sh
+```
+
+Then run a smoke train:
+
+```bash
+uv run spades-train-puffer \
+  --num-envs 4 \
+  --total-timesteps 1024 \
+  --horizon 16 \
+  --minibatch-size 64 \
+  --hidden-size 64 \
+  --num-layers 1 \
+  --cuda-buffers \
+  --save-path checkpoints/spades_smoke.pt
+```
+
 Current Limitations
 -------------------
 
 - Reward shaping config exists, but shaped rewards are not implemented yet.
 - The Gymnasium wrapper is a single-controller wrapper over the current player.
 - The PettingZoo wrapper is minimal and intended for compatibility smoke tests.
-- PufferLib training has not been validated on this machine.
+- The current PufferLib training adapter uses Python Spades envs with CUDA model
+  buffers; a native C/PufferLib env would be the next performance step.
