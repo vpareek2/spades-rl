@@ -45,6 +45,28 @@ def test_puffer_vec_env_cpu_step_shapes_and_masks():
     assert vec.illegal_actions == 0
 
 
+def test_puffer_vec_env_can_limit_bidding_curriculum():
+    vec = SpadesPufferVecEnv(
+        SpadesPufferConfig(
+            num_envs=1,
+            seed=7,
+            max_normal_bid=5,
+            nil_enabled=False,
+            blind_nil_enabled=False,
+        )
+    )
+
+    env = vec.envs[0]
+    active = env.current_player()
+    for player in range(4):
+        slot = player
+        mask = vec._obs[slot, MASK_OFFSET:]
+        if player == active:
+            assert np.flatnonzero(mask).tolist() == [52, 53, 54, 55, 56]
+        else:
+            assert np.flatnonzero(mask).tolist() == [0]
+
+
 def test_masked_spades_policy_masks_invalid_logits():
     policy = MaskedSpadesPolicy(FLAT_OBSERVATION_SIZE, ACTION_SPACE_SIZE, hidden_size=32, num_layers=1)
     obs = torch.zeros(2, FLAT_OBSERVATION_SIZE)

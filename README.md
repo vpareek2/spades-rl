@@ -126,6 +126,18 @@ By default, PPO episodes terminate at Spades hand boundaries because the
 environment scores contracts per hand. Use `--match-episodes` to train across
 full multi-hand matches instead.
 
+For an easier first curriculum, constrain bidding and remove nil/blind nil:
+
+```bash
+uv run spades-train-puffer \
+  --num-envs 256 \
+  --total-timesteps 5242880 \
+  --max-normal-bid 5 \
+  --no-nil \
+  --no-blind-nil \
+  --cuda-buffers
+```
+
 Current Limitations
 -------------------
 

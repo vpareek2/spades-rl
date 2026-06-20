@@ -19,6 +19,7 @@ from spades.actions import ACTION_SPACE_SIZE
 from spades.config import SpadesPlusConfig
 from spades.env import IllegalActionError, SpadesPlusEnv
 from spades.observations import FLAT_OBSERVATION_SIZE, flatten_observation
+from spades.state import Phase
 
 
 MASK_OFFSET = FLAT_OBSERVATION_SIZE - ACTION_SPACE_SIZE
@@ -48,6 +49,13 @@ class SpadesPufferConfig:
     reward_scale: float = 0.01
     use_cuda_buffers: bool = False
     hand_episodes: bool = True
+    max_normal_bid: int = 13
+    nil_enabled: bool = True
+    blind_nil_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_normal_bid <= 13:
+            raise ValueError("max_normal_bid must be in [1, 13]")
 
 
 class SpadesPufferVecEnv:
@@ -76,7 +84,13 @@ class SpadesPufferVecEnv:
             raise RuntimeError("CUDA buffers requested, but torch.cuda.is_available() is false")
 
         self.envs = [
-            SpadesPlusEnv(SpadesPlusConfig())
+            SpadesPlusEnv(
+                SpadesPlusConfig(
+                    nil_enabled=self.config.nil_enabled,
+                    blind_nil_enabled=self.config.blind_nil_enabled,
+                    blind_nil_policy="always" if self.config.blind_nil_enabled else "disabled",
+                )
+            )
             for _ in range(self.num_envs)
         ]
         self._env_steps = np.zeros(self.num_envs, dtype=np.int32)
@@ -164,7 +178,7 @@ class SpadesPufferVecEnv:
             active_player = env.current_player()
             slot = self._slot(env_idx, active_player)
             action = int(actions[slot])
-            legal = env.legal_actions()
+            legal = self._training_legal_actions(env)
             if action not in legal:
                 self.illegal_actions += 1
                 action = int(legal[0])
@@ -215,10 +229,24 @@ class SpadesPufferVecEnv:
             active_player = env.current_player()
             for player in range(self.num_agents):
                 flat = flatten_observation(env.observe(player)).astype(np.float32, copy=True)
-                if player != active_player:
-                    flat[MASK_OFFSET:] = 0.0
-                    flat[MASK_OFFSET] = 1.0
+                flat[MASK_OFFSET:] = self._action_mask_for_observation(env, player == active_player)
                 self._obs[self._slot(env_idx, player)] = flat
+
+    def _action_mask_for_observation(self, env: SpadesPlusEnv, active: bool) -> np.ndarray:
+        mask = np.zeros(ACTION_SPACE_SIZE, dtype=np.float32)
+        if not active:
+            mask[0] = 1.0
+            return mask
+        for action in self._training_legal_actions(env):
+            mask[action] = 1.0
+        return mask
+
+    def _training_legal_actions(self, env: SpadesPlusEnv) -> list[int]:
+        legal = env.legal_actions()
+        if env.phase != Phase.BIDDING:
+            return legal
+        max_action = 51 + self.config.max_normal_bid
+        return [action for action in legal if action <= max_action or action >= 65]
 
     def _sync_to_gpu(self) -> None:
         if not self.gpu:
@@ -371,6 +399,11 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps-per-match", type=int, default=5000)
     parser.add_argument("--reward-scale", type=float, default=0.01)
+    parser.add_argument("--max-normal-bid", type=int, default=13)
+    parser.add_argument("--nil", action="store_true", default=True)
+    parser.add_argument("--no-nil", action="store_false", dest="nil")
+    parser.add_argument("--blind-nil", action="store_true", default=True)
+    parser.add_argument("--no-blind-nil", action="store_false", dest="blind_nil")
     parser.add_argument("--hand-episodes", action="store_true", default=True)
     parser.add_argument("--match-episodes", action="store_false", dest="hand_episodes")
     parser.add_argument("--log-interval", type=int, default=1)
@@ -457,6 +490,9 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
             reward_scale=cli_args.reward_scale,
             use_cuda_buffers=cli_args.cuda_buffers,
             hand_episodes=cli_args.hand_episodes,
+            max_normal_bid=cli_args.max_normal_bid,
+            nil_enabled=cli_args.nil,
+            blind_nil_enabled=cli_args.blind_nil,
         )
     )
     args = build_train_args(cli_args)
