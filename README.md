@@ -1,0 +1,101 @@
+Spades+ Classic RL Environment
+==============================
+
+This repository contains a Python implementation of a turn-based, multi-agent
+Spades+ Classic environment for reinforcement learning and self-play.
+
+The current priority is correctness and testability of the rules engine. PufferLib
+training integration is intentionally deferred until running on a machine that can
+support it.
+
+Project Layout
+--------------
+
+- `src/spades/env.py`: core `SpadesPlusEnv`
+- `src/spades/config.py`: game, scoring, and reward configuration
+- `src/spades/actions.py`: fixed action-space helpers
+- `src/spades/rules.py`: legal-play and trick-resolution helpers
+- `src/spades/scoring.py`: hand scoring, nil/blind nil, and bag penalties
+- `src/spades/observations.py`: dict observations and flat RL vectors
+- `src/spades/wrappers/`: Gymnasium and PettingZoo AEC wrappers
+- `src/spades/bots.py`: simple baseline bots for smoke tests
+- `src/spades/rollout.py`: quick match rollout helper
+- `tests/`: unit, controlled-hand, wrapper, and rollout tests
+- `env.md`: implementation spec for the Spades+ rules variant
+
+Rules Summary
+-------------
+
+The default environment models a four-player partnership Spades game:
+
+- Players `0` and `2` are partners; players `1` and `3` are partners.
+- Each player bids individually.
+- Team score delta is the sum of both partners' individual score deltas.
+- Nil and blind nil are enabled by default.
+- Bags are enabled with a threshold of `10` and penalty of `-100`.
+- Spades cannot be led until broken unless the player has only spades.
+- Dealer, first bidder, and first trick leader rotate by hand.
+
+Action Space
+------------
+
+The environment uses one fixed discrete action space of size `67`:
+
+- `0-51`: play card by card id
+- `52-64`: normal bids `1-13`
+- `65`: nil
+- `66`: blind nil
+
+Card ids are encoded as `suit * 13 + rank_index`, with suits ordered clubs,
+diamonds, hearts, spades and ranks ordered `2` through `A`.
+
+Basic Usage
+-----------
+
+```python
+from spades import SpadesPlusEnv
+
+env = SpadesPlusEnv()
+obs = env.reset(seed=0)
+
+while True:
+    legal_actions = env.legal_actions()
+    action = legal_actions[0]
+    obs, rewards, terminated, truncated, info = env.step(action)
+    if terminated or truncated:
+        break
+```
+
+For manual debugging:
+
+```bash
+uv run spades-repl
+```
+
+For a simple import smoke test:
+
+```bash
+uv run spades
+```
+
+Testing
+-------
+
+Run the full local test suite:
+
+```bash
+uv run pytest
+```
+
+Current coverage includes card/action encoding, legal action masks, deterministic
+dealing, bidding/play phase transitions, scoring and bag penalties, controlled
+hands, history/debug APIs, rollout smoke tests, and Gymnasium/PettingZoo wrapper
+checks.
+
+Current Limitations
+-------------------
+
+- Reward shaping config exists, but shaped rewards are not implemented yet.
+- The Gymnasium wrapper is a single-controller wrapper over the current player.
+- The PettingZoo wrapper is minimal and intended for compatibility smoke tests.
+- PufferLib training has not been validated on this machine.
