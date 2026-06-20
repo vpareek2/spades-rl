@@ -150,6 +150,15 @@ uv run spades-train-puffer \
   --cuda-buffers
 ```
 
+Evaluate a checkpoint greedily:
+
+```bash
+uv run spades-eval-puffer checkpoints/spades_curriculum_25m.pt \
+  --max-normal-bid 5 \
+  --no-nil \
+  --no-blind-nil
+```
+
 Current Limitations
 -------------------
 

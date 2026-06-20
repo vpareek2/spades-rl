@@ -16,6 +16,7 @@ import torch
 from torch import nn
 
 from spades.actions import ACTION_SPACE_SIZE
+from spades.actions import bid_action_to_bid
 from spades.config import SpadesPlusConfig
 from spades.env import IllegalActionError, SpadesPlusEnv
 from spades.observations import FLAT_OBSERVATION_SIZE, flatten_observation
@@ -418,6 +419,17 @@ def make_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _filter_bidding_mask(flat: np.ndarray, max_normal_bid: int) -> np.ndarray:
+    flat = flat.copy()
+    mask = flat[MASK_OFFSET:].copy()
+    allowed = np.zeros_like(mask)
+    allowed[:52] = mask[:52]
+    allowed[52 : 52 + max_normal_bid] = mask[52 : 52 + max_normal_bid]
+    allowed[65:] = mask[65:]
+    flat[MASK_OFFSET:] = allowed
+    return flat
+
+
 def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     from pufferlib import pufferl
     from pufferlib.torch_pufferl import Profile, PuffeRL, _actions_for_vec_step, sample_logits
@@ -553,6 +565,111 @@ def main() -> None:
     parser = make_parser()
     args = parser.parse_args()
     train(args)
+
+
+def evaluate_policy(args: argparse.Namespace) -> dict[str, Any]:
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    policy = MaskedSpadesPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+    ).to(device)
+    state_dict = torch.load(args.checkpoint, map_location=device)
+    policy.load_state_dict(state_dict)
+    policy.eval()
+
+    env_config = SpadesPlusConfig(
+        nil_enabled=args.nil,
+        blind_nil_enabled=args.blind_nil,
+        blind_nil_policy="always" if args.blind_nil else "disabled",
+    )
+    env = SpadesPlusEnv(env_config)
+    env.reset(seed=args.seed)
+
+    hand_scores: list[float] = []
+    team_deltas: list[list[int]] = []
+    bid_counts: dict[int, int] = {}
+    illegal_actions = 0
+
+    while len(hand_scores) < args.hands:
+        obs = env.observe()
+        flat = flatten_observation(obs).astype(np.float32)
+        if obs["phase"] == 0:
+            flat = _filter_bidding_mask(flat, args.max_normal_bid)
+        x = torch.from_numpy(flat).float().to(device).unsqueeze(0)
+        with torch.no_grad():
+            logits, _values, _state = policy.forward_eval(x, ())
+            action = int(torch.argmax(logits, dim=1).item())
+
+        legal = env.legal_actions()
+        if obs["phase"] == 0:
+            legal = [action for action in legal if action <= 51 + args.max_normal_bid or action >= 65]
+        if action not in legal:
+            illegal_actions += 1
+            action = int(legal[0])
+        if obs["phase"] == 0:
+            bid_counts[action] = bid_counts.get(action, 0) + 1
+
+        _obs, rewards, terminated, truncated, info = env.step(action)
+        if info.get("hand_completed"):
+            hand_scores.append(float(np.mean(rewards) * args.reward_scale))
+            team_deltas.append([int(value) for value in info["team_score_delta"]])
+        if terminated or truncated:
+            env.reset(seed=args.seed + len(hand_scores))
+
+    scores = np.asarray(hand_scores, dtype=np.float32)
+    deltas = np.asarray(team_deltas, dtype=np.float32)
+    top_bids = [
+        {
+            "action": action,
+            "bid": str(bid_action_to_bid(action)),
+            "count": count,
+        }
+        for action, count in sorted(bid_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+    ]
+    return {
+        "checkpoint": args.checkpoint,
+        "hands": args.hands,
+        "mean": float(scores.mean()),
+        "last100": float(scores[-100:].mean()),
+        "min": float(scores.min()),
+        "max": float(scores.max()),
+        "illegal_actions": illegal_actions,
+        "mean_team_delta": deltas.mean(axis=0).tolist() if len(deltas) else [0.0, 0.0],
+        "top_bids": top_bids,
+    }
+
+
+def make_eval_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Evaluate a Spades Puffer checkpoint greedily")
+    parser.add_argument("checkpoint", type=str)
+    parser.add_argument("--hands", type=int, default=1024)
+    parser.add_argument("--hidden-size", type=int, default=256)
+    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--reward-scale", type=float, default=0.01)
+    parser.add_argument("--max-normal-bid", type=int, default=13)
+    parser.add_argument("--nil", action="store_true", default=True)
+    parser.add_argument("--no-nil", action="store_false", dest="nil")
+    parser.add_argument("--blind-nil", action="store_true", default=True)
+    parser.add_argument("--no-blind-nil", action="store_false", dest="blind_nil")
+    parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument("--output", type=str, default="")
+    return parser
+
+
+def eval_main() -> None:
+    parser = make_eval_parser()
+    args = parser.parse_args()
+    metrics = evaluate_policy(args)
+    rendered = json.dumps(metrics, indent=2, sort_keys=True)
+    print(rendered)
+    if args.output:
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        with open(args.output, "w") as f:
+            f.write(rendered)
+            f.write("\n")
 
 
 if __name__ == "__main__":
