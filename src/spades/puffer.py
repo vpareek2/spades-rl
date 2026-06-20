@@ -409,6 +409,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     parser.add_argument("--log-dir", type=str, default="logs")
+    parser.add_argument("--load-path", type=str, default="")
     parser.add_argument("--save-path", type=str, default="")
     parser.add_argument("--metrics-path", type=str, default="")
     parser.add_argument("--cuda-buffers", action="store_true", default=False)
@@ -502,6 +503,9 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         hidden_size=cli_args.hidden_size,
         num_layers=cli_args.num_layers,
     ).to("cuda" if torch.cuda.is_available() else "cpu")
+    if cli_args.load_path:
+        state_dict = torch.load(cli_args.load_path, map_location=next(policy.parameters()).device)
+        policy.load_state_dict(state_dict)
 
     trainer = AlignedPuffeRL(args, vec, policy, verbose=False)
     final_logs: dict[str, Any] = {}
@@ -536,6 +540,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         trainer.close()
 
     final_logs["model_path"] = cli_args.save_path
+    final_logs["loaded_model_path"] = cli_args.load_path
     final_logs["completed_at"] = time.time()
     if cli_args.metrics_path:
         os.makedirs(os.path.dirname(cli_args.metrics_path) or ".", exist_ok=True)

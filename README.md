@@ -138,6 +138,18 @@ uv run spades-train-puffer \
   --cuda-buffers
 ```
 
+Continue from a checkpoint with `--load-path`:
+
+```bash
+uv run spades-train-puffer \
+  --load-path checkpoints/spades_curriculum_5m.pt \
+  --save-path checkpoints/spades_curriculum_next.pt \
+  --max-normal-bid 5 \
+  --no-nil \
+  --no-blind-nil \
+  --cuda-buffers
+```
+
 Current Limitations
 -------------------
 
