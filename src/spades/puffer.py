@@ -386,7 +386,65 @@ def make_parser() -> argparse.ArgumentParser:
 
 def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     from pufferlib import pufferl
-    from pufferlib.torch_pufferl import PuffeRL
+    from pufferlib.torch_pufferl import Profile, PuffeRL, _actions_for_vec_step, sample_logits
+
+    class AlignedPuffeRL(PuffeRL):
+        """PuffeRL variant that stores step rewards with the sampled action.
+
+        PufferLib's generic PyTorch rollout loop mirrors the native callback
+        convention where reward buffers are read before the next action is
+        sampled. For sparse hand-end rewards in this Python turn env, storing
+        the reward after stepping gives much cleaner credit assignment.
+        """
+
+        def rollouts(self):
+            prof = self.profile
+            config = self.config
+            device = self.device
+            horizon = config["horizon"]
+
+            self.state = tuple(torch.zeros_like(s) for s in self.state) if self.state else ()
+            o = self.vec_obs
+
+            prof.mark(0)
+            for t in range(horizon):
+                o_device = torch.as_tensor(o, device=device)
+
+                prof.mark(1)
+                with torch.no_grad():
+                    logits, value, state = self.policy.forward_eval(o_device, self.state)
+                    action, logprob, _ = sample_logits(logits)
+                prof.mark(2)
+
+                with torch.no_grad():
+                    self.state = state
+                    self.observations[t] = o_device
+                    self.actions[t] = action
+                    self.logprobs[t] = logprob
+                    self.values[t] = value.flatten()
+
+                actions_flat = _actions_for_vec_step(action)
+                if self.gpu:
+                    actions_flat = actions_flat.cuda()
+                    self._vec.gpu_step(actions_flat.data_ptr())
+                    torch.cuda.synchronize()
+                else:
+                    if actions_flat.is_cuda:
+                        actions_flat = actions_flat.cpu()
+                    self._vec.cpu_step(actions_flat.data_ptr())
+
+                o = self.vec_obs
+                with torch.no_grad():
+                    self.rewards[t] = torch.as_tensor(self.vec_rewards, device=device)
+                    self.terminals[t] = torch.as_tensor(self.vec_terminals, device=device).float()
+                prof.mark(3)
+                prof.elapsed(Profile.EVAL_GPU, 1, 2)
+                prof.elapsed(Profile.EVAL_ENV, 2, 3)
+
+            prof.mark(1)
+            prof.elapsed(Profile.ROLLOUT, 0, 1)
+            self.global_step += self.total_agents * horizon
+            self.env_logs = self._vec.log()
 
     torch.manual_seed(cli_args.seed)
     np.random.seed(cli_args.seed)
@@ -409,7 +467,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         num_layers=cli_args.num_layers,
     ).to("cuda" if torch.cuda.is_available() else "cpu")
 
-    trainer = PuffeRL(args, vec, policy, verbose=False)
+    trainer = AlignedPuffeRL(args, vec, policy, verbose=False)
     final_logs: dict[str, Any] = {}
     try:
         while trainer.epoch < trainer.total_epochs:
