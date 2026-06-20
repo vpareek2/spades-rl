@@ -150,6 +150,20 @@ uv run spades-train-puffer \
   --cuda-buffers
 ```
 
+If PPO collapses to always bidding one, bootstrap the bidding logits from the
+conservative bid bot before continuing PPO:
+
+```bash
+uv run spades-pretrain-puffer \
+  --load-path checkpoints/spades_curriculum_25m.pt \
+  --save-path checkpoints/spades_curriculum_25m_bidbot.pt \
+  --samples 262144 \
+  --max-normal-bid 5 \
+  --no-nil \
+  --no-blind-nil \
+  --freeze-encoder
+```
+
 Evaluate a checkpoint greedily:
 
 ```bash

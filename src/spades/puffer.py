@@ -14,9 +14,11 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from spades.actions import ACTION_SPACE_SIZE
 from spades.actions import bid_action_to_bid
+from spades.bots import ConservativeBidBot
 from spades.config import SpadesPlusConfig
 from spades.env import IllegalActionError, SpadesPlusEnv
 from spades.observations import FLAT_OBSERVATION_SIZE, flatten_observation
@@ -430,6 +432,11 @@ def _filter_bidding_mask(flat: np.ndarray, max_normal_bid: int) -> np.ndarray:
     return flat
 
 
+def _filter_bidding_legal_actions(legal_actions: list[int], max_normal_bid: int) -> list[int]:
+    max_action = 51 + max_normal_bid
+    return [action for action in legal_actions if action <= max_action or action >= 65]
+
+
 def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     from pufferlib import pufferl
     from pufferlib.torch_pufferl import Profile, PuffeRL, _actions_for_vec_step, sample_logits
@@ -604,7 +611,7 @@ def evaluate_policy(args: argparse.Namespace) -> dict[str, Any]:
 
         legal = env.legal_actions()
         if obs["phase"] == 0:
-            legal = [action for action in legal if action <= 51 + args.max_normal_bid or action >= 65]
+            legal = _filter_bidding_legal_actions(legal, args.max_normal_bid)
         if action not in legal:
             illegal_actions += 1
             action = int(legal[0])
@@ -670,6 +677,162 @@ def eval_main() -> None:
         with open(args.output, "w") as f:
             f.write(rendered)
             f.write("\n")
+
+
+def _collect_bidding_batch(
+    env: SpadesPlusEnv,
+    bot: ConservativeBidBot,
+    rng: np.random.Generator,
+    batch_size: int,
+    max_normal_bid: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    observations: list[np.ndarray] = []
+    actions: list[int] = []
+    while len(actions) < batch_size:
+        seed = int(rng.integers(0, np.iinfo(np.int32).max))
+        env.reset(seed=seed)
+        while env.phase == Phase.BIDDING and len(actions) < batch_size:
+            obs = env.observe()
+            legal = _filter_bidding_legal_actions(env.legal_actions(), max_normal_bid)
+            action = int(bot.act(obs, legal, rng))
+            flat = _filter_bidding_mask(flatten_observation(obs).astype(np.float32), max_normal_bid)
+            observations.append(flat)
+            actions.append(action)
+            env.step(action)
+
+    return np.stack(observations).astype(np.float32), np.asarray(actions, dtype=np.int64)
+
+
+def pretrain_bidding(args: argparse.Namespace) -> dict[str, Any]:
+    if args.samples <= 0:
+        raise ValueError("samples must be positive")
+    if args.batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if not 1 <= args.max_normal_bid <= 13:
+        raise ValueError("max_normal_bid must be in [1, 13]")
+
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    policy = MaskedSpadesPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+    ).to(device)
+    if args.load_path:
+        state_dict = torch.load(args.load_path, map_location=device)
+        policy.load_state_dict(state_dict)
+
+    if args.freeze_encoder:
+        for param in policy.encoder.parameters():
+            param.requires_grad = False
+
+    trainable_params = [param for param in policy.parameters() if param.requires_grad]
+    if not trainable_params:
+        raise ValueError("No trainable policy parameters remain after freezing")
+
+    optimizer = torch.optim.Adam(trainable_params, lr=args.learning_rate)
+    env = SpadesPlusEnv(
+        SpadesPlusConfig(
+            nil_enabled=args.nil,
+            blind_nil_enabled=args.blind_nil,
+            blind_nil_policy="always" if args.blind_nil else "disabled",
+        )
+    )
+    bot = ConservativeBidBot()
+    rng = np.random.default_rng(args.seed)
+
+    samples_seen = 0
+    batches = 0
+    total_correct = 0
+    total_loss = 0.0
+    policy.train()
+    while samples_seen < args.samples:
+        batch_size = min(args.batch_size, args.samples - samples_seen)
+        observations, actions = _collect_bidding_batch(
+            env,
+            bot,
+            rng,
+            batch_size,
+            args.max_normal_bid,
+        )
+        x = torch.from_numpy(observations).to(device)
+        y = torch.from_numpy(actions).to(device)
+
+        logits, _values, _state = policy.forward_eval(x, ())
+        loss = F.cross_entropy(logits, y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            correct = int((logits.argmax(dim=1) == y).sum().item())
+        samples_seen += batch_size
+        batches += 1
+        total_correct += correct
+        total_loss += float(loss.item()) * batch_size
+
+        if batches % args.log_interval == 0 or samples_seen >= args.samples:
+            print(
+                "batch={batch} samples={samples} loss={loss:.4f} acc={acc:.4f}".format(
+                    batch=batches,
+                    samples=samples_seen,
+                    loss=total_loss / samples_seen,
+                    acc=total_correct / samples_seen,
+                ),
+                flush=True,
+            )
+
+    if args.save_path:
+        os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
+        torch.save(policy.state_dict(), args.save_path)
+
+    metrics = {
+        "samples": samples_seen,
+        "batches": batches,
+        "loss": total_loss / samples_seen,
+        "accuracy": total_correct / samples_seen,
+        "model_path": args.save_path,
+        "loaded_model_path": args.load_path,
+        "completed_at": time.time(),
+    }
+    if args.metrics_path:
+        os.makedirs(os.path.dirname(args.metrics_path) or ".", exist_ok=True)
+        with open(args.metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2, sort_keys=True)
+    return metrics
+
+
+def make_pretrain_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Bootstrap Spades Puffer bidding logits from the conservative bid bot"
+    )
+    parser.add_argument("--samples", type=int, default=131_072)
+    parser.add_argument("--batch-size", type=int, default=2048)
+    parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--hidden-size", type=int, default=256)
+    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--max-normal-bid", type=int, default=13)
+    parser.add_argument("--nil", action="store_true", default=True)
+    parser.add_argument("--no-nil", action="store_false", dest="nil")
+    parser.add_argument("--blind-nil", action="store_true", default=True)
+    parser.add_argument("--no-blind-nil", action="store_false", dest="blind_nil")
+    parser.add_argument("--load-path", type=str, default="")
+    parser.add_argument("--save-path", type=str, default="checkpoints/spades_bidding_pretrain.pt")
+    parser.add_argument("--metrics-path", type=str, default="")
+    parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument("--freeze-encoder", action="store_true", default=False)
+    parser.add_argument("--log-interval", type=int, default=10)
+    return parser
+
+
+def pretrain_main() -> None:
+    parser = make_pretrain_parser()
+    args = parser.parse_args()
+    pretrain_bidding(args)
 
 
 if __name__ == "__main__":

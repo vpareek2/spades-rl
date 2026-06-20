@@ -1,11 +1,18 @@
 import ctypes
+from argparse import Namespace
 
 import numpy as np
 import torch
 
 from spades.actions import ACTION_SPACE_SIZE
 from spades.observations import FLAT_OBSERVATION_SIZE
-from spades.puffer import MASK_OFFSET, MaskedSpadesPolicy, SpadesPufferConfig, SpadesPufferVecEnv
+from spades.puffer import (
+    MASK_OFFSET,
+    MaskedSpadesPolicy,
+    SpadesPufferConfig,
+    SpadesPufferVecEnv,
+    pretrain_bidding,
+)
 
 
 def test_puffer_vec_env_cpu_step_shapes_and_masks():
@@ -84,3 +91,33 @@ def test_masked_spades_policy_masks_invalid_logits():
     assert logits[0, 0] < -1.0e8
     assert logits[1, 0] > -1.0e8
     assert logits[1, 52] < -1.0e8
+
+
+def test_puffer_bidding_pretrain_smoke(tmp_path):
+    save_path = tmp_path / "pretrain.pt"
+    metrics_path = tmp_path / "pretrain.json"
+
+    metrics = pretrain_bidding(
+        Namespace(
+            samples=16,
+            batch_size=8,
+            learning_rate=0.001,
+            hidden_size=32,
+            num_layers=1,
+            seed=5,
+            max_normal_bid=5,
+            nil=False,
+            blind_nil=False,
+            load_path="",
+            save_path=str(save_path),
+            metrics_path=str(metrics_path),
+            cpu=True,
+            freeze_encoder=False,
+            log_interval=99,
+        )
+    )
+
+    assert metrics["samples"] == 16
+    assert 0.0 <= metrics["accuracy"] <= 1.0
+    assert save_path.exists()
+    assert metrics_path.exists()
