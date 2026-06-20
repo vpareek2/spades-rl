@@ -1,0 +1,9 @@
+{
+  "accuracy": 0.44326019287109375,
+  "batches": 128,
+  "completed_at": 1781992223.2229512,
+  "loaded_model_path": "checkpoints/spades_curriculum_25m.pt",
+  "loss": 1.37051223218441,
+  "model_path": "checkpoints/spades_curriculum_25m_bidbot.pt",
+  "samples": 262144
+}

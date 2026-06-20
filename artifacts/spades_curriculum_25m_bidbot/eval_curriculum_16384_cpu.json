@@ -1,0 +1,40 @@
+{
+  "checkpoint": "checkpoints/spades_curriculum_25m_bidbot.pt",
+  "hands": 16384,
+  "illegal_actions": 0,
+  "last100": -0.04114999622106552,
+  "max": 0.6049999594688416,
+  "mean": -0.010721435770392418,
+  "mean_team_delta": [
+    -1.0426025390625,
+    -1.1016845703125
+  ],
+  "min": -0.98499995470047,
+  "top_bids": [
+    {
+      "action": 53,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=2)",
+      "count": 51762
+    },
+    {
+      "action": 54,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=3)",
+      "count": 9792
+    },
+    {
+      "action": 52,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=1)",
+      "count": 3755
+    },
+    {
+      "action": 56,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=5)",
+      "count": 224
+    },
+    {
+      "action": 55,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=4)",
+      "count": 3
+    }
+  ]
+}

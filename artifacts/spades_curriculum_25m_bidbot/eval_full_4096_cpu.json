@@ -1,0 +1,65 @@
+{
+  "checkpoint": "checkpoints/spades_curriculum_25m_bidbot.pt",
+  "hands": 4096,
+  "illegal_actions": 0,
+  "last100": -0.013900002464652061,
+  "max": 0.6049999594688416,
+  "mean": -0.025358887389302254,
+  "mean_team_delta": [
+    -2.67138671875,
+    -2.400390625
+  ],
+  "min": -2.990000009536743,
+  "top_bids": [
+    {
+      "action": 53,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=2)",
+      "count": 12571
+    },
+    {
+      "action": 54,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=3)",
+      "count": 2031
+    },
+    {
+      "action": 52,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=1)",
+      "count": 1730
+    },
+    {
+      "action": 64,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=13)",
+      "count": 17
+    },
+    {
+      "action": 66,
+      "bid": "Bid(kind=<BidKind.BLIND_NIL: 'blind_nil'>, value=0)",
+      "count": 10
+    },
+    {
+      "action": 56,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=5)",
+      "count": 9
+    },
+    {
+      "action": 55,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=4)",
+      "count": 5
+    },
+    {
+      "action": 65,
+      "bid": "Bid(kind=<BidKind.NIL: 'nil'>, value=0)",
+      "count": 5
+    },
+    {
+      "action": 59,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=8)",
+      "count": 3
+    },
+    {
+      "action": 63,
+      "bid": "Bid(kind=<BidKind.NORMAL: 'normal'>, value=12)",
+      "count": 3
+    }
+  ]
+}

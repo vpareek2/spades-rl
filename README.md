@@ -173,6 +173,13 @@ uv run spades-eval-puffer checkpoints/spades_curriculum_25m.pt \
   --no-blind-nil
 ```
 
+The current best checkpoint is preserved in
+`artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`. It scored
+`mean=-0.010721435770392418` over 16,384 greedy hands with normal bids capped at
+5, nil disabled, blind nil disabled, and `0` illegal actions. With the full
+action space enabled it scored `mean=-0.025358887389302254` over 4,096 hands and
+also produced `0` illegal actions.
+
 Current Limitations
 -------------------
 
