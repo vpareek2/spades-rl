@@ -496,14 +496,22 @@ Decision:
 
 ## Play-EV V5 Team-Aware 10k Strong Anchor
 
-Launched a larger team-aware data-scaling run after the V4 strong-anchor no-promotion:
+Launched a larger team-aware data-scaling run after the V4 strong-anchor no-promotion.
+
+Important correction:
+
+- The first V5 launch used the generator default `--device cpu`, because the pipeline runner did not pass a device into `spades-generate-play-ev`.
+- This made the A100 sit at `0%` GPU while CPU load saturated the 14-core box.
+- Stopped that partial run after a few hundred EV states.
+- Fixed `scripts/run_play_ev_team_aware_pipeline.sh` to default `DEVICE=cuda` and pass `--device "$DEVICE"` during dataset generation.
+- Restarted as `play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda`.
 
 - runner: `scripts/run_play_ev_team_aware_pipeline.sh`
-- run name: `play_ev_v5_team_aware_10k_s4_v2_strong_anchor`
+- run name: `play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda`
 - base: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
 - state ally / rollout ally: same V2 checkpoint
 - state opponent / rollout opponent: `bot:conservative`
-- dataset: `data/play_ev_v5_team_aware_10k_s4_v2_strong_anchor.npz`
+- dataset: `data/play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda.npz`
 - states: `10000`
 - rollout samples: `4`
 - seed: `5205`
@@ -513,14 +521,14 @@ Launched a larger team-aware data-scaling run after the V4 strong-anchor no-prom
 - behavior anchor path: V2 checkpoint
 - anchor weights: `10.0`, `30.0`, `100.0`
 - duplicate screening: 512 hands per trained checkpoint
-- log dir: `logs/play_ev_v5_team_aware_10k_s4_v2_strong_anchor/`
+- log dir: `logs/play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda/`
 
 Launch command shape:
 
 ```bash
 UV_BIN=/home/ubuntu/.local/bin/uv \
 BASE_CHECKPOINT=checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt \
-RUN_NAME=play_ev_v5_team_aware_10k_s4_v2_strong_anchor \
+RUN_NAME=play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda \
 STATES=10000 \
 ROLLOUT_SAMPLES=4 \
 SEED=5205 \
@@ -528,6 +536,7 @@ WEIGHTS="10.0 30.0 100.0" \
 LEARNING_RATE=0.0001 \
 EPOCHS=30 \
 BATCH_SIZE=512 \
+DEVICE=cuda \
 DUPLICATE_HANDS=512 \
 WANDB=1 \
 WANDB_GROUP=play-ev-v5-team-aware-10k \
@@ -536,9 +545,9 @@ scripts/run_play_ev_team_aware_pipeline.sh
 
 Status:
 
-- started on the A100 at about `2026-06-21T23:40Z`,
-- state collection had reached about `2942/10000` when first checked,
-- state collection completed quickly and the run entered `Evaluate play EV`,
+- CPU run started on the A100 at about `2026-06-21T23:40Z` and was aborted after discovering the device issue,
+- CUDA run started at about `2026-06-21T23:48Z`,
+- early CUDA health check: GPU utilization around `39%`, GPU memory around `595 MiB`, and state collection at `5010/10000`,
 - auto-confirm watcher `scripts/auto_confirm_play_ev_summary.sh` is running for this run with threshold `+10.5` raw at 512 hands,
 - expected runtime is roughly 3 hours for dataset generation plus a few minutes for training/eval.
 
