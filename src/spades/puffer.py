@@ -352,6 +352,8 @@ def build_train_args(cli_args: argparse.Namespace) -> dict[str, Any]:
             "bid_anchor_weight": cli_args.bid_anchor_weight,
             "bid_q_anchor_weight": cli_args.bid_q_anchor_weight,
             "bid_anchor_temperature": cli_args.bid_anchor_temperature,
+            "play_anchor_weight": cli_args.play_anchor_weight,
+            "play_anchor_temperature": cli_args.play_anchor_temperature,
         },
     }
 
@@ -437,6 +439,47 @@ def bid_anchor_losses(
     return policy_kl, q_anchor, int(bid_obs.shape[0])
 
 
+def play_anchor_loss(
+    policy: SpadesTransformerPolicy,
+    teacher: SpadesTransformerPolicy | None,
+    observations: torch.Tensor,
+    *,
+    temperature: float,
+) -> tuple[torch.Tensor, int]:
+    if teacher is None:
+        return observations.sum() * 0.0, 0
+    if temperature <= 0:
+        raise ValueError("play anchor temperature must be positive")
+
+    flat_obs = observations.reshape(-1, observations.shape[-1])
+    active = flat_obs[:, CURRENT_PLAYER_REL_INDEX] == 0
+    playing = flat_obs[:, PHASE_INDEX] != 0
+    play_rows = active & playing
+    if not bool(play_rows.any().item()):
+        return flat_obs.sum() * 0.0, 0
+
+    play_obs = flat_obs[play_rows]
+    legal = play_obs[:, MASK_OFFSET : MASK_OFFSET + 52] > 0.5
+    valid = legal.any(dim=1)
+    if not bool(valid.any().item()):
+        return flat_obs.sum() * 0.0, 0
+    play_obs = play_obs[valid]
+    legal = legal[valid]
+
+    student_heads = policy.forward_heads(play_obs, apply_mask=False)
+    with torch.no_grad():
+        teacher_heads = teacher.forward_heads(play_obs, apply_mask=False)
+
+    student_logits = student_heads["logits"][:, :52]
+    teacher_logits = teacher_heads["logits"][:, :52]
+    student_logits = student_logits.masked_fill(~legal, -1.0e9) / temperature
+    teacher_logits = teacher_logits.masked_fill(~legal, -1.0e9) / temperature
+    teacher_probs = torch.softmax(teacher_logits, dim=1)
+    student_log_probs = torch.log_softmax(student_logits, dim=1)
+    policy_kl = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+    return policy_kl, int(play_obs.shape[0])
+
+
 def _wandb_config(cli_args: argparse.Namespace) -> dict[str, Any]:
     keys = [
         "num_envs",
@@ -475,6 +518,9 @@ def _wandb_config(cli_args: argparse.Namespace) -> dict[str, Any]:
         "bid_anchor_weight",
         "bid_q_anchor_weight",
         "bid_anchor_temperature",
+        "play_anchor_path",
+        "play_anchor_weight",
+        "play_anchor_temperature",
     ]
     return {key: getattr(cli_args, key) for key in keys}
 
@@ -605,6 +651,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bid-anchor-weight", type=float, default=0.0)
     parser.add_argument("--bid-q-anchor-weight", type=float, default=0.0)
     parser.add_argument("--bid-anchor-temperature", type=float, default=1.0)
+    parser.add_argument("--play-anchor-path", type=str, default="")
+    parser.add_argument("--play-anchor-weight", type=float, default=0.0)
+    parser.add_argument("--play-anchor-temperature", type=float, default=1.0)
     parser.add_argument("--wandb", action="store_true", default=False)
     parser.add_argument("--wandb-project", type=str, default="spades-rl")
     parser.add_argument("--wandb-group", type=str, default="ppo")
@@ -646,6 +695,10 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("bid anchor weights must be non-negative")
     if cli_args.bid_anchor_temperature <= 0:
         raise ValueError("bid anchor temperature must be positive")
+    if cli_args.play_anchor_weight < 0:
+        raise ValueError("play anchor weight must be non-negative")
+    if cli_args.play_anchor_temperature <= 0:
+        raise ValueError("play anchor temperature must be positive")
     validate_interval_checkpoint_args(cli_args.checkpoint_interval_steps, cli_args.checkpoint_prefix)
 
     class AlignedPuffeRL(PuffeRL):
@@ -657,9 +710,16 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         the reward after stepping gives much cleaner credit assignment.
         """
 
-        def __init__(self, *args, bid_teacher: SpadesTransformerPolicy | None = None, **kwargs):
+        def __init__(
+            self,
+            *args,
+            bid_teacher: SpadesTransformerPolicy | None = None,
+            play_teacher: SpadesTransformerPolicy | None = None,
+            **kwargs,
+        ):
             super().__init__(*args, **kwargs)
             self.bid_teacher = bid_teacher
+            self.play_teacher = play_teacher
 
         def rollouts(self):
             prof = self.profile
@@ -814,12 +874,19 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                     mb_obs,
                     temperature=float(config["bid_anchor_temperature"]),
                 )
+                play_kl, play_anchor_rows = play_anchor_loss(
+                    self.policy,
+                    self.play_teacher,
+                    mb_obs,
+                    temperature=float(config["play_anchor_temperature"]),
+                )
                 loss = (
                     pg_loss
                     + config["vf_coef"] * v_loss
                     - config["ent_coef"] * entropy_loss
                     + float(config["bid_anchor_weight"]) * anchor_kl
                     + float(config["bid_q_anchor_weight"]) * anchor_q
+                    + float(config["play_anchor_weight"]) * play_kl
                 )
                 val[idx] = newvalue.detach().float()
 
@@ -832,11 +899,13 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                 losses["importance"] += float(_weighted_mean(ratio, weights).detach().item())
                 losses["bid_anchor_kl"] += float(anchor_kl.detach().item())
                 losses["bid_q_anchor_loss"] += float(anchor_q.detach().item())
+                losses["play_anchor_kl"] += float(play_kl.detach().item())
                 counts["active_rows"] += float(active_mask.sum().item())
                 counts["bid_rows"] += float((active_mask & bid_mask).sum().item())
                 counts["play_rows"] += float((active_mask & play_mask).sum().item())
                 counts["ppo_weighted_rows"] += float(weights.sum().item())
                 counts["bid_anchor_rows"] += float(anchor_rows)
+                counts["play_anchor_rows"] += float(play_anchor_rows)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config["max_grad_norm"])
@@ -897,8 +966,28 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     elif cli_args.bid_anchor_weight > 0 or cli_args.bid_q_anchor_weight > 0:
         raise ValueError("bid anchor weights require --bid-anchor-path or --load-path")
 
+    play_teacher = None
+    play_anchor_path = cli_args.play_anchor_path
+    if not play_anchor_path and cli_args.play_anchor_weight > 0:
+        play_anchor_path = cli_args.load_path
+    if play_anchor_path:
+        play_teacher = build_policy_from_args(cli_args, vec.obs_size, device)
+        load_transformer_state(play_teacher, play_anchor_path, next(play_teacher.parameters()).device)
+        play_teacher.eval()
+        for param in play_teacher.parameters():
+            param.requires_grad = False
+    elif cli_args.play_anchor_weight > 0:
+        raise ValueError("play anchor weight requires --play-anchor-path or --load-path")
+
     wandb_module, wandb_run = _init_wandb(cli_args)
-    trainer = AlignedPuffeRL(args, vec, policy, verbose=False, bid_teacher=bid_teacher)
+    trainer = AlignedPuffeRL(
+        args,
+        vec,
+        policy,
+        verbose=False,
+        bid_teacher=bid_teacher,
+        play_teacher=play_teacher,
+    )
     final_logs: dict[str, Any] = {}
     history: list[dict[str, Any]] = []
     saved_checkpoints: list[dict[str, Any]] = []
@@ -931,7 +1020,8 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                 history.append(final_logs)
                 print(
                     "epoch={epoch} steps={steps:.0f} sps={sps:.0f} "
-                    "score={score:.4f} hand_score={hand_score:.4f} bid_kl={bid_kl:.4f} "
+                    "score={score:.4f} hand_score={hand_score:.4f} "
+                    "bid_kl={bid_kl:.4f} play_kl={play_kl:.4f} "
                     "episodes={episodes:.0f} hands={hands:.0f} "
                     "matches={matches:.0f} illegal={illegal:.0f}".format(
                         epoch=int(final_logs.get("epoch", trainer.epoch)),
@@ -940,6 +1030,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                         score=float(final_logs.get("env/score", 0.0)),
                         hand_score=float(final_logs.get("env/hand_score", 0.0)),
                         bid_kl=float(final_logs.get("loss/bid_anchor_kl", 0.0)),
+                        play_kl=float(final_logs.get("loss/play_anchor_kl", 0.0)),
                         episodes=float(final_logs.get("env/completed_episodes", 0.0)),
                         hands=float(final_logs.get("env/completed_hands", 0.0)),
                         matches=float(final_logs.get("env/completed_matches", 0.0)),
@@ -966,6 +1057,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     final_logs["model_path"] = cli_args.save_path
     final_logs["loaded_model_path"] = cli_args.load_path
     final_logs["bid_anchor_path"] = anchor_path
+    final_logs["play_anchor_path"] = play_anchor_path
     final_logs["saved_checkpoints"] = saved_checkpoints
     final_logs["completed_at"] = time.time()
     if cli_args.metrics_path:

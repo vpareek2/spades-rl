@@ -24,8 +24,10 @@ from spades.puffer import (
     SpadesPufferVecEnv,
     attach_log_history,
     bid_anchor_losses,
+    build_train_args,
     checkpoint_path_for_step,
     freeze_bid_heads,
+    play_anchor_loss,
     pretrain_bidding,
     save_interval_checkpoints,
     validate_interval_checkpoint_args,
@@ -218,6 +220,116 @@ def test_bid_anchor_loss_matches_identical_teacher_and_ignores_play_rows():
     assert rows == 1
     assert float(policy_kl.item()) < 1e-6
     assert float(q_anchor.item()) < 1e-6
+
+
+def test_play_anchor_loss_matches_identical_teacher_and_ignores_nonplay_rows():
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    teacher = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    teacher.load_state_dict(policy.state_dict())
+    policy.eval()
+    teacher.eval()
+
+    obs = torch.zeros(3, FLAT_OBSERVATION_SIZE)
+    obs[0, 0] = 1.0
+    obs[0, 1] = 0.0
+    obs[0, MASK_OFFSET : MASK_OFFSET + 3] = 1.0
+    obs[1, 0] = 0.0
+    obs[1, 1] = 0.0
+    obs[1, MASK_OFFSET + 52 : MASK_OFFSET + 55] = 1.0
+    obs[2, 0] = 1.0
+    obs[2, 1] = 2.0
+    obs[2, MASK_OFFSET : MASK_OFFSET + 3] = 1.0
+
+    policy_kl, rows = play_anchor_loss(policy, teacher, obs, temperature=1.0)
+
+    assert rows == 1
+    assert float(policy_kl.item()) < 1e-6
+
+
+class StaticHeadPolicy:
+    def __init__(self, logits: torch.Tensor):
+        self.logits = logits
+
+    def forward_heads(self, observations: torch.Tensor, apply_mask: bool = False):
+        del apply_mask
+        return {"logits": self.logits.to(observations.device).expand(observations.shape[0], -1)}
+
+
+def test_play_anchor_loss_ignores_illegal_card_logits():
+    student_logits = torch.zeros(ACTION_SPACE_SIZE)
+    teacher_logits = torch.zeros(ACTION_SPACE_SIZE)
+    teacher_logits[2] = 100.0
+    obs = torch.zeros(1, FLAT_OBSERVATION_SIZE)
+    obs[0, 0] = 1.0
+    obs[0, 1] = 0.0
+    obs[0, MASK_OFFSET] = 1.0
+    obs[0, MASK_OFFSET + 1] = 1.0
+
+    policy_kl, rows = play_anchor_loss(
+        StaticHeadPolicy(student_logits),
+        StaticHeadPolicy(teacher_logits),
+        obs,
+        temperature=1.0,
+    )
+
+    assert rows == 1
+    assert float(policy_kl.item()) < 1e-6
+
+
+def test_train_args_include_play_anchor_config():
+    args = Namespace(
+        checkpoint_dir="checkpoints",
+        log_dir="logs",
+        total_timesteps=1024,
+        learning_rate=1e-4,
+        anneal_lr=False,
+        gamma=0.99,
+        gae_lambda=0.95,
+        replay_ratio=1.0,
+        clip_coef=0.2,
+        vf_coef=1.0,
+        vf_clip_coef=0.2,
+        max_grad_norm=1.0,
+        ent_coef=0.01,
+        beta1=0.9,
+        beta2=0.999,
+        eps=1e-8,
+        minibatch_size=64,
+        horizon=16,
+        vtrace_rho_clip=1.0,
+        vtrace_c_clip=1.0,
+        prio_alpha=0.8,
+        prio_beta0=0.2,
+        active_only_loss=True,
+        bid_ppo_weight=0.0,
+        play_ppo_weight=1.0,
+        bid_anchor_weight=1.0,
+        bid_q_anchor_weight=0.05,
+        bid_anchor_temperature=1.0,
+        play_anchor_weight=0.3,
+        play_anchor_temperature=1.5,
+    )
+
+    config = build_train_args(args)["train"]
+
+    assert config["play_anchor_weight"] == 0.3
+    assert config["play_anchor_temperature"] == 1.5
 
 
 def test_attach_log_history_avoids_circular_final_log_reference():
