@@ -538,9 +538,11 @@ Status:
 
 - started on the A100 at about `2026-06-21T23:40Z`,
 - state collection had reached about `2942/10000` when first checked,
+- state collection completed quickly and the run entered `Evaluate play EV`,
+- auto-confirm watcher `scripts/auto_confirm_play_ev_summary.sh` is running for this run with threshold `+10.5` raw at 512 hands,
 - expected runtime is roughly 3 hours for dataset generation plus a few minutes for training/eval.
 
 Decision gate:
 
-- if a V5 checkpoint clearly beats V2's 512-hand result, run 2048 confirmation,
+- if a V5 checkpoint has at least `+10.5` raw at 512 hands, the watcher will run a 2048 confirmation automatically,
 - otherwise keep V2 as current best and stop scaling this exact team-aware label recipe.
