@@ -257,3 +257,43 @@ Decision:
 - next experiment should use the promoted checkpoint for another play-EV iteration.
 
 Important limitation: current play-EV rollouts use one rollout actor for all four seats. That is not exactly duplicate evaluation, where policy A controls one team and conservative controls the other. The v1 result is still useful, but the next implementation pass should add team-aware state collection/rollout actors for higher-quality labels.
+
+## Play-EV V2 From Promoted V1 Checkpoint
+
+Second play-EV iteration:
+
+- base: `checkpoints/play_ev_v1_2k_s4_headonly_from_w03_262144.pt`
+- state actor: `checkpoint:checkpoints/play_ev_v1_2k_s4_headonly_from_w03_262144.pt`
+- rollout actor: `bot:conservative`
+- dataset: `data/play_ev_v2_10k_s4_best_state_conservative_rollout.npz`
+- output: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- mode: `--play-heads-only`
+
+Dataset eval:
+
+```text
+base on v2 dataset:
+  top1: 46.16%
+  regret: 4.52
+  mean_policy_ev: 37.84
+
+play_ev_v2_10k_s4_headonly_from_best:
+  top1: 46.87%
+  regret: 3.92
+  mean_policy_ev: 38.44
+```
+
+Duplicate eval:
+
+```text
+512 hands:  +11.42 raw, CI [+9.65, +13.19]
+2048 hands: +11.17 raw, CI [+10.29, +12.06]
+contract failures at 2048: A=732, B=1154
+illegal actions: 0
+```
+
+Decision:
+
+- promote `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as the current best checkpoint,
+- this is a large confirmed improvement over v1 (`+6.36` raw at 2048) and smoke (`~+4.34` raw at 2048 from earlier confirmation),
+- continue with another self-iteration using the v2 checkpoint as state actor/base while keeping the known limitation about single-actor rollouts in mind.
