@@ -1,4 +1,5 @@
 import ctypes
+import json
 from argparse import Namespace
 
 import numpy as np
@@ -23,8 +24,11 @@ from spades.puffer import (
     SpadesPufferVecEnv,
     attach_log_history,
     bid_anchor_losses,
+    checkpoint_path_for_step,
     freeze_bid_heads,
     pretrain_bidding,
+    save_interval_checkpoints,
+    validate_interval_checkpoint_args,
 )
 
 
@@ -225,6 +229,99 @@ def test_attach_log_history_avoids_circular_final_log_reference():
     assert metrics is not final
     assert metrics["history"][1] is not final
     assert metrics["history"][1] == {"epoch": 2}
+
+
+def test_interval_checkpoint_path_uses_padded_steps():
+    assert checkpoint_path_for_step("checkpoints/ladder", 131072) == (
+        "checkpoints/ladder_000131072.pt"
+    )
+
+
+def test_interval_checkpoint_validation_rejects_bad_args():
+    validate_interval_checkpoint_args(0, "")
+    validate_interval_checkpoint_args(10, "checkpoints/ladder")
+    with pytest.raises(ValueError, match="non-negative"):
+        validate_interval_checkpoint_args(-1, "checkpoints/ladder")
+    with pytest.raises(ValueError, match="checkpoint-prefix"):
+        validate_interval_checkpoint_args(10, "")
+
+
+class DummyTrainer:
+    def __init__(self, global_step: int, epoch: int = 1):
+        self.global_step = global_step
+        self.epoch = epoch
+        self.saved_paths: list[str] = []
+
+    def save_weights(self, path: str) -> None:
+        self.saved_paths.append(path)
+
+
+def test_interval_checkpoint_helper_saves_nothing_before_threshold(tmp_path):
+    trainer = DummyTrainer(global_step=99, epoch=3)
+    saved: list[dict] = []
+
+    next_step = save_interval_checkpoints(
+        trainer,
+        prefix=str(tmp_path / "ladder"),
+        next_step=100,
+        interval_steps=100,
+        saved_checkpoints=saved,
+    )
+
+    assert next_step == 100
+    assert saved == []
+    assert trainer.saved_paths == []
+
+
+def test_interval_checkpoint_helper_saves_one_checkpoint_at_threshold(tmp_path):
+    trainer = DummyTrainer(global_step=100, epoch=4)
+    saved: list[dict] = []
+
+    next_step = save_interval_checkpoints(
+        trainer,
+        prefix=str(tmp_path / "ladder"),
+        next_step=100,
+        interval_steps=100,
+        saved_checkpoints=saved,
+    )
+
+    expected_path = str(tmp_path / "ladder_000000100.pt")
+    assert next_step == 200
+    assert trainer.saved_paths == [expected_path]
+    assert saved == [{"path": expected_path, "step": 100, "epoch": 4}]
+
+
+def test_interval_checkpoint_helper_saves_missed_intervals(tmp_path):
+    trainer = DummyTrainer(global_step=350, epoch=5)
+    saved: list[dict] = []
+
+    next_step = save_interval_checkpoints(
+        trainer,
+        prefix=str(tmp_path / "ladder"),
+        next_step=100,
+        interval_steps=100,
+        saved_checkpoints=saved,
+    )
+
+    assert next_step == 400
+    assert trainer.saved_paths == [
+        str(tmp_path / "ladder_000000100.pt"),
+        str(tmp_path / "ladder_000000200.pt"),
+        str(tmp_path / "ladder_000000300.pt"),
+    ]
+    assert [row["step"] for row in saved] == [100, 200, 300]
+    assert [row["epoch"] for row in saved] == [5, 5, 5]
+
+
+def test_metrics_with_saved_checkpoints_are_json_serializable():
+    metrics = attach_log_history({"epoch": 1}, [{"epoch": 1}])
+    metrics["saved_checkpoints"] = [
+        {"path": "checkpoints/ladder_000131072.pt", "step": 131072, "epoch": 32}
+    ]
+
+    encoded = json.dumps(metrics, sort_keys=True)
+
+    assert "saved_checkpoints" in encoded
 
 
 def test_transformer_checkpoint_loader_rejects_mlp_state(tmp_path):

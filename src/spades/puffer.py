@@ -465,6 +465,8 @@ def _wandb_config(cli_args: argparse.Namespace) -> dict[str, Any]:
         "hand_episodes",
         "load_path",
         "save_path",
+        "checkpoint_interval_steps",
+        "checkpoint_prefix",
         "active_only_loss",
         "bid_ppo_weight",
         "play_ppo_weight",
@@ -500,6 +502,45 @@ def _wandb_artifact_name(cli_args: argparse.Namespace) -> str:
     if cli_args.save_path:
         return os.path.splitext(os.path.basename(cli_args.save_path))[0]
     return "spades_puffer"
+
+
+def validate_interval_checkpoint_args(interval_steps: int, prefix: str) -> None:
+    if interval_steps < 0:
+        raise ValueError("checkpoint interval steps must be non-negative")
+    if interval_steps > 0 and not prefix:
+        raise ValueError("--checkpoint-prefix is required when --checkpoint-interval-steps is enabled")
+
+
+def checkpoint_path_for_step(prefix: str, step: int) -> str:
+    if step < 0:
+        raise ValueError("checkpoint step must be non-negative")
+    return f"{prefix}_{step:09d}.pt"
+
+
+def save_interval_checkpoints(
+    trainer: Any,
+    *,
+    prefix: str,
+    next_step: int,
+    interval_steps: int,
+    saved_checkpoints: list[dict[str, Any]],
+) -> int:
+    if interval_steps <= 0:
+        return next_step
+
+    while trainer.global_step >= next_step:
+        path = checkpoint_path_for_step(prefix, next_step)
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        trainer.save_weights(path)
+        saved_checkpoints.append(
+            {
+                "path": path,
+                "step": int(next_step),
+                "epoch": int(trainer.epoch),
+            }
+        )
+        next_step += interval_steps
+    return next_step
 
 
 def attach_log_history(final_logs: dict[str, Any], history: list[dict[str, Any]]) -> dict[str, Any]:
@@ -551,6 +592,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--load-path", type=str, default="")
     parser.add_argument("--save-path", type=str, default="")
     parser.add_argument("--metrics-path", type=str, default="")
+    parser.add_argument("--checkpoint-interval-steps", type=int, default=0)
+    parser.add_argument("--checkpoint-prefix", type=str, default="")
     parser.add_argument("--cuda-buffers", action="store_true", default=False)
     parser.add_argument("--cpu-buffers", action="store_false", dest="cuda_buffers")
     parser.add_argument("--anneal-lr", action="store_true", default=False)
@@ -603,6 +646,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("bid anchor weights must be non-negative")
     if cli_args.bid_anchor_temperature <= 0:
         raise ValueError("bid anchor temperature must be positive")
+    validate_interval_checkpoint_args(cli_args.checkpoint_interval_steps, cli_args.checkpoint_prefix)
 
     class AlignedPuffeRL(PuffeRL):
         """PuffeRL variant that stores step rewards with the sampled action.
@@ -857,10 +901,31 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     trainer = AlignedPuffeRL(args, vec, policy, verbose=False, bid_teacher=bid_teacher)
     final_logs: dict[str, Any] = {}
     history: list[dict[str, Any]] = []
+    saved_checkpoints: list[dict[str, Any]] = []
+    next_checkpoint_step = (
+        cli_args.checkpoint_interval_steps if cli_args.checkpoint_interval_steps > 0 else 0
+    )
     try:
         while trainer.epoch < trainer.total_epochs:
             trainer.rollouts()
             trainer.train()
+            saved_before = len(saved_checkpoints)
+            next_checkpoint_step = save_interval_checkpoints(
+                trainer,
+                prefix=cli_args.checkpoint_prefix,
+                next_step=next_checkpoint_step,
+                interval_steps=cli_args.checkpoint_interval_steps,
+                saved_checkpoints=saved_checkpoints,
+            )
+            if wandb_run is not None and len(saved_checkpoints) > saved_before:
+                for checkpoint in saved_checkpoints[saved_before:]:
+                    wandb_run.log(
+                        {
+                            "checkpoint/saved": 1,
+                            "checkpoint/step": int(checkpoint["step"]),
+                        },
+                        step=int(checkpoint["step"]),
+                    )
             if trainer.epoch % cli_args.log_interval == 0 or trainer.epoch == trainer.total_epochs:
                 final_logs = dict(pufferl.unroll_nested_dict(trainer.log()))
                 history.append(final_logs)
@@ -901,6 +966,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     final_logs["model_path"] = cli_args.save_path
     final_logs["loaded_model_path"] = cli_args.load_path
     final_logs["bid_anchor_path"] = anchor_path
+    final_logs["saved_checkpoints"] = saved_checkpoints
     final_logs["completed_at"] = time.time()
     if cli_args.metrics_path:
         os.makedirs(os.path.dirname(cli_args.metrics_path) or ".", exist_ok=True)
