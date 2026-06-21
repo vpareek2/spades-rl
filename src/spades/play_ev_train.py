@@ -251,6 +251,22 @@ def _configure_trainable(policy: SpadesTransformerPolicy, args: argparse.Namespa
     return params
 
 
+def _set_frozen_modules_eval(policy: SpadesTransformerPolicy, args: argparse.Namespace) -> None:
+    if args.play_heads_only or args.freeze_encoder:
+        for module in (policy.tokenizer, policy.transformer, policy.final_norm):
+            module.eval()
+    if args.play_heads_only:
+        for module in (
+            policy.bid_policy_head,
+            policy.bid_q_head,
+            policy.value_head,
+            policy.margin_value_head,
+            policy.hidden_owner_head,
+            policy.void_head,
+        ):
+            module.eval()
+
+
 def _wandb_config(args: argparse.Namespace, rows: dict[str, int], device: str, use_amp: bool) -> dict[str, Any]:
     keys = [
         "dataset",
@@ -362,6 +378,7 @@ def train_play_ev(args: argparse.Namespace) -> dict[str, Any]:
         epoch_iter = tqdm(range(1, args.epochs + 1), desc="Play EV training", disable=not args.progress)
         for epoch in epoch_iter:
             policy.train()
+            _set_frozen_modules_eval(policy, args)
             running_loss = 0.0
             rows_seen = 0
             batch_iter = tqdm(
