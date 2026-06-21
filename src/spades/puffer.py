@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch.nn import functional as F
+from tqdm.auto import tqdm
 
 from spades.actions import ACTION_SPACE_SIZE
 from spades.actions import bid_action_to_bid
@@ -563,31 +564,38 @@ def evaluate_policy(args: argparse.Namespace) -> dict[str, Any]:
     bid_counts: dict[int, int] = {}
     illegal_actions = 0
 
-    while len(hand_scores) < args.hands:
-        obs = env.observe()
-        flat = flatten_observation(obs).astype(np.float32)
-        if obs["phase"] == 0:
-            flat = _filter_bidding_mask(flat, args.max_normal_bid)
-        x = torch.from_numpy(flat).float().to(device).unsqueeze(0)
-        with torch.no_grad():
-            logits, _values, _state = policy.forward_eval(x, ())
-            action = int(torch.argmax(logits, dim=1).item())
+    progress = tqdm(total=args.hands, desc="Evaluate hands", disable=not args.progress)
+    try:
+        while len(hand_scores) < args.hands:
+            obs = env.observe()
+            flat = flatten_observation(obs).astype(np.float32)
+            if obs["phase"] == 0:
+                flat = _filter_bidding_mask(flat, args.max_normal_bid)
+            x = torch.from_numpy(flat).float().to(device).unsqueeze(0)
+            with torch.no_grad():
+                logits, _values, _state = policy.forward_eval(x, ())
+                action = int(torch.argmax(logits, dim=1).item())
 
-        legal = env.legal_actions()
-        if obs["phase"] == 0:
-            legal = _filter_bidding_legal_actions(legal, args.max_normal_bid)
-        if action not in legal:
-            illegal_actions += 1
-            action = int(legal[0])
-        if obs["phase"] == 0:
-            bid_counts[action] = bid_counts.get(action, 0) + 1
+            legal = env.legal_actions()
+            if obs["phase"] == 0:
+                legal = _filter_bidding_legal_actions(legal, args.max_normal_bid)
+            if action not in legal:
+                illegal_actions += 1
+                action = int(legal[0])
+            if obs["phase"] == 0:
+                bid_counts[action] = bid_counts.get(action, 0) + 1
 
-        _obs, rewards, terminated, truncated, info = env.step(action)
-        if info.get("hand_completed"):
-            hand_scores.append(float(np.mean(rewards) * args.reward_scale))
-            team_deltas.append([int(value) for value in info["team_score_delta"]])
-        if terminated or truncated:
-            env.reset(seed=args.seed + len(hand_scores))
+            _obs, rewards, terminated, truncated, info = env.step(action)
+            if info.get("hand_completed"):
+                hand_scores.append(float(np.mean(rewards) * args.reward_scale))
+                team_deltas.append([int(value) for value in info["team_score_delta"]])
+                progress.update(1)
+                if hand_scores:
+                    progress.set_postfix(mean=f"{np.mean(hand_scores):.4f}", illegal=illegal_actions)
+            if terminated or truncated:
+                env.reset(seed=args.seed + len(hand_scores))
+    finally:
+        progress.close()
 
     scores = np.asarray(hand_scores, dtype=np.float32)
     deltas = np.asarray(team_deltas, dtype=np.float32)
@@ -629,6 +637,8 @@ def make_eval_parser() -> argparse.ArgumentParser:
     parser.add_argument("--blind-nil", action="store_true", default=True)
     parser.add_argument("--no-blind-nil", action="store_false", dest="blind_nil")
     parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument("--progress", action="store_true", default=True)
+    parser.add_argument("--no-progress", action="store_false", dest="progress")
     parser.add_argument("--output", type=str, default="")
     return parser
 

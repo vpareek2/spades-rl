@@ -47,6 +47,7 @@ def test_duplicate_eval_same_policy_has_zero_paired_margin():
         nil=False,
         blind_nil=False,
         reward_scale=0.01,
+        progress=False,
     )
 
     assert metrics["duplicate_margin_mean"] == 0.0
@@ -66,6 +67,7 @@ def test_duplicate_eval_swapping_policies_negates_margin():
         nil=False,
         blind_nil=False,
         reward_scale=0.01,
+        progress=False,
     )
     ba = evaluate_duplicate(
         highest,
@@ -76,6 +78,7 @@ def test_duplicate_eval_swapping_policies_negates_margin():
         nil=False,
         blind_nil=False,
         reward_scale=0.01,
+        progress=False,
     )
 
     assert ab["duplicate_margin_mean"] == -ba["duplicate_margin_mean"]
@@ -97,6 +100,7 @@ def test_duplicate_eval_cli_writes_json(tmp_path, monkeypatch):
             "5",
             "--no-nil",
             "--no-blind-nil",
+            "--no-progress",
             "--output",
             str(output),
         ],

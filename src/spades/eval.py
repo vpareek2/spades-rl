@@ -10,6 +10,7 @@ from typing import Protocol
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from spades.actions import ACTION_SPACE_SIZE, BLIND_NIL_ACTION, NIL_ACTION
 from spades.bots import (
@@ -239,6 +240,7 @@ def evaluate_duplicate(
     nil: bool,
     blind_nil: bool,
     reward_scale: float,
+    progress: bool = True,
 ) -> dict:
     stats = _empty_stats()
     paired_margins: list[float] = []
@@ -247,41 +249,47 @@ def evaluate_duplicate(
     table_welfare: list[float] = []
     team_deltas_by_orientation: dict[str, list[list[int]]] = {"a_team0": [], "a_team1": []}
 
-    for hand_idx in range(hands):
-        deal = generate_deal(seed + hand_idx)
-        orientation0 = play_duplicate_orientation(
-            deal,
-            actor_a,
-            actor_b,
-            a_is_team0=True,
-            max_normal_bid=max_normal_bid,
-            nil=nil,
-            blind_nil=blind_nil,
-            reward_scale=reward_scale,
-            seed=seed * 10_000 + hand_idx * 2,
-            stats=stats,
-        )
-        orientation1 = play_duplicate_orientation(
-            deal,
-            actor_a,
-            actor_b,
-            a_is_team0=False,
-            max_normal_bid=max_normal_bid,
-            nil=nil,
-            blind_nil=blind_nil,
-            reward_scale=reward_scale,
-            seed=seed * 10_000 + hand_idx * 2 + 1,
-            stats=stats,
-        )
-        margin0 = float(orientation0["a_margin"])
-        margin1 = float(orientation1["a_margin"])
-        orientation0_margins.append(margin0)
-        orientation1_margins.append(margin1)
-        paired_margins.append((margin0 + margin1) / 2.0)
-        table_welfare.append(float(orientation0["table_welfare"]))
-        table_welfare.append(float(orientation1["table_welfare"]))
-        team_deltas_by_orientation["a_team0"].append(orientation0["team_delta"])
-        team_deltas_by_orientation["a_team1"].append(orientation1["team_delta"])
+    progress_bar = tqdm(total=hands, desc="Duplicate deals", disable=not progress)
+    try:
+        for hand_idx in range(hands):
+            deal = generate_deal(seed + hand_idx)
+            orientation0 = play_duplicate_orientation(
+                deal,
+                actor_a,
+                actor_b,
+                a_is_team0=True,
+                max_normal_bid=max_normal_bid,
+                nil=nil,
+                blind_nil=blind_nil,
+                reward_scale=reward_scale,
+                seed=seed * 10_000 + hand_idx * 2,
+                stats=stats,
+            )
+            orientation1 = play_duplicate_orientation(
+                deal,
+                actor_a,
+                actor_b,
+                a_is_team0=False,
+                max_normal_bid=max_normal_bid,
+                nil=nil,
+                blind_nil=blind_nil,
+                reward_scale=reward_scale,
+                seed=seed * 10_000 + hand_idx * 2 + 1,
+                stats=stats,
+            )
+            margin0 = float(orientation0["a_margin"])
+            margin1 = float(orientation1["a_margin"])
+            orientation0_margins.append(margin0)
+            orientation1_margins.append(margin1)
+            paired_margins.append((margin0 + margin1) / 2.0)
+            table_welfare.append(float(orientation0["table_welfare"]))
+            table_welfare.append(float(orientation1["table_welfare"]))
+            team_deltas_by_orientation["a_team0"].append(orientation0["team_delta"])
+            team_deltas_by_orientation["a_team1"].append(orientation1["team_delta"])
+            progress_bar.update(1)
+            progress_bar.set_postfix(mean=f"{np.mean(paired_margins):.4f}")
+    finally:
+        progress_bar.close()
 
     margins = np.asarray(paired_margins, dtype=np.float32)
     se = _stderr(margins)
@@ -372,6 +380,8 @@ def make_duplicate_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--reward-scale", type=float, default=0.01)
     parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument("--progress", action="store_true", default=True)
+    parser.add_argument("--no-progress", action="store_false", dest="progress")
     parser.add_argument("--output", type=str, default="")
     return parser
 
@@ -415,6 +425,7 @@ def duplicate_main() -> None:
         nil=args.nil,
         blind_nil=args.blind_nil,
         reward_scale=args.reward_scale,
+        progress=args.progress,
     )
     rendered = json.dumps(metrics, indent=2, sort_keys=True)
     print(rendered)
