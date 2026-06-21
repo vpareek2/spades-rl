@@ -474,6 +474,34 @@ def train_bid_ev(args: argparse.Namespace) -> dict[str, Any]:
             wandb_run.finish()
 
 
+def eval_bid_ev_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
+    if args.batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if args.q_scale <= 0:
+        raise ValueError("q_scale must be positive")
+    if args.policy_temperature <= 0:
+        raise ValueError("policy_temperature must be positive")
+
+    dataset = load_bid_ev_dataset(args.dataset)
+    device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    policy = build_bid_ev_policy(args, device)
+    load_transformer_state(policy, args.checkpoint, device)
+    metrics = asdict(evaluate_bid_ev(policy, dataset, args, device))
+    metrics.update(
+        {
+            "checkpoint": args.checkpoint,
+            "dataset": args.dataset,
+            "rows": int(len(dataset.observations)),
+        }
+    )
+    if args.output:
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        with open(args.output, "w") as f:
+            json.dump(metrics, f, indent=2, sort_keys=True)
+            f.write("\n")
+    return metrics
+
+
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Spades transformer bidding heads from rollout-EV labels")
     parser.add_argument("--dataset", required=True)
@@ -513,8 +541,37 @@ def make_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def make_eval_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Evaluate a checkpoint on rollout-EV bidding labels")
+    parser.add_argument("checkpoint", type=str)
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--q-scale", type=float, default=100.0)
+    parser.add_argument("--policy-temperature", type=float, default=25.0)
+    parser.add_argument("--q-weight", type=float, default=1.0)
+    parser.add_argument("--policy-weight", type=float, default=1.0)
+    parser.add_argument("--rank-weight", type=float, default=0.1)
+    parser.add_argument("--rank-gap", type=float, default=10.0)
+    parser.add_argument("--rank-margin", type=float, default=0.05)
+    parser.add_argument("--d-model", type=int, default=256)
+    parser.add_argument("--transformer-layers", type=int, default=6)
+    parser.add_argument("--attention-heads", type=int, default=8)
+    parser.add_argument("--ffn-size", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.05)
+    parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument("--output", type=str, default="")
+    return parser
+
+
 def main() -> None:
     parser = make_parser()
     args = parser.parse_args()
     metrics = train_bid_ev(args)
+    print(json.dumps(metrics, indent=2, sort_keys=True))
+
+
+def eval_main() -> None:
+    parser = make_eval_parser()
+    args = parser.parse_args()
+    metrics = eval_bid_ev_checkpoint(args)
     print(json.dumps(metrics, indent=2, sort_keys=True))

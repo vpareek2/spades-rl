@@ -7,7 +7,7 @@ import ctypes
 import json
 import os
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,7 +16,7 @@ import torch
 from torch.nn import functional as F
 from tqdm.auto import tqdm
 
-from spades.actions import ACTION_SPACE_SIZE
+from spades.actions import ACTION_SPACE_SIZE, BID_ACTION_START
 from spades.actions import bid_action_to_bid
 from spades.bots import ConservativeBidBot
 from spades.config import SpadesPlusConfig
@@ -27,6 +27,8 @@ from spades.state import Phase
 
 
 MASK_OFFSET = FLAT_OBSERVATION_SIZE - ACTION_SPACE_SIZE
+PHASE_INDEX = 0
+CURRENT_PLAYER_REL_INDEX = 1
 
 
 class _CudaPtr:
@@ -344,8 +346,160 @@ def build_train_args(cli_args: argparse.Namespace) -> dict[str, Any]:
             "vtrace_c_clip": cli_args.vtrace_c_clip,
             "prio_alpha": cli_args.prio_alpha,
             "prio_beta0": cli_args.prio_beta0,
+            "active_only_loss": cli_args.active_only_loss,
+            "bid_ppo_weight": cli_args.bid_ppo_weight,
+            "play_ppo_weight": cli_args.play_ppo_weight,
+            "bid_anchor_weight": cli_args.bid_anchor_weight,
+            "bid_q_anchor_weight": cli_args.bid_q_anchor_weight,
+            "bid_anchor_temperature": cli_args.bid_anchor_temperature,
         },
     }
+
+
+def freeze_bid_heads(policy: SpadesTransformerPolicy) -> None:
+    for module in (policy.bid_policy_head, policy.bid_q_head):
+        for param in module.parameters():
+            param.requires_grad = False
+
+
+def _decision_phase_weights(
+    observations: torch.Tensor,
+    *,
+    active_only_loss: bool,
+    bid_ppo_weight: float,
+    play_ppo_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    active = observations[..., CURRENT_PLAYER_REL_INDEX] == 0
+    bidding = observations[..., PHASE_INDEX] == 0
+    playing = ~bidding
+    weights = torch.where(
+        bidding,
+        torch.full_like(observations[..., PHASE_INDEX], float(bid_ppo_weight)),
+        torch.full_like(observations[..., PHASE_INDEX], float(play_ppo_weight)),
+    )
+    if active_only_loss:
+        weights = weights * active.float()
+    return weights, active, bidding, playing
+
+
+def _weighted_mean(values: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    denom = weights.sum()
+    if float(denom.detach().item()) <= 0.0:
+        return values.sum() * 0.0
+    return (values * weights).sum() / denom.clamp_min(1.0)
+
+
+def bid_anchor_losses(
+    policy: SpadesTransformerPolicy,
+    teacher: SpadesTransformerPolicy | None,
+    observations: torch.Tensor,
+    *,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    if teacher is None:
+        zero = observations.sum() * 0.0
+        return zero, zero, 0
+    if temperature <= 0:
+        raise ValueError("bid anchor temperature must be positive")
+
+    flat_obs = observations.reshape(-1, observations.shape[-1])
+    active = flat_obs[:, CURRENT_PLAYER_REL_INDEX] == 0
+    bidding = flat_obs[:, PHASE_INDEX] == 0
+    bid_rows = active & bidding
+    if not bool(bid_rows.any().item()):
+        zero = flat_obs.sum() * 0.0
+        return zero, zero, 0
+
+    bid_obs = flat_obs[bid_rows]
+    legal = bid_obs[:, MASK_OFFSET + BID_ACTION_START : MASK_OFFSET + ACTION_SPACE_SIZE] > 0.5
+    valid = legal.any(dim=1)
+    if not bool(valid.any().item()):
+        zero = flat_obs.sum() * 0.0
+        return zero, zero, 0
+    bid_obs = bid_obs[valid]
+    legal = legal[valid]
+
+    student_heads = policy.forward_heads(bid_obs, apply_mask=False)
+    with torch.no_grad():
+        teacher_heads = teacher.forward_heads(bid_obs, apply_mask=False)
+
+    student_logits = student_heads["logits"][:, BID_ACTION_START:ACTION_SPACE_SIZE]
+    teacher_logits = teacher_heads["logits"][:, BID_ACTION_START:ACTION_SPACE_SIZE]
+    student_logits = student_logits.masked_fill(~legal, -1.0e9) / temperature
+    teacher_logits = teacher_logits.masked_fill(~legal, -1.0e9) / temperature
+    teacher_probs = torch.softmax(teacher_logits, dim=1)
+    student_log_probs = torch.log_softmax(student_logits, dim=1)
+    policy_kl = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+    student_q = student_heads["bid_q"]
+    teacher_q = teacher_heads["bid_q"]
+    q_anchor = F.smooth_l1_loss(student_q[legal], teacher_q[legal])
+    return policy_kl, q_anchor, int(bid_obs.shape[0])
+
+
+def _wandb_config(cli_args: argparse.Namespace) -> dict[str, Any]:
+    keys = [
+        "num_envs",
+        "total_timesteps",
+        "horizon",
+        "minibatch_size",
+        "learning_rate",
+        "gamma",
+        "gae_lambda",
+        "replay_ratio",
+        "clip_coef",
+        "vf_coef",
+        "vf_clip_coef",
+        "max_grad_norm",
+        "ent_coef",
+        "d_model",
+        "transformer_layers",
+        "attention_heads",
+        "ffn_size",
+        "dropout",
+        "seed",
+        "reward_scale",
+        "max_normal_bid",
+        "nil",
+        "blind_nil",
+        "hand_episodes",
+        "load_path",
+        "save_path",
+        "active_only_loss",
+        "bid_ppo_weight",
+        "play_ppo_weight",
+        "freeze_bid_heads",
+        "bid_anchor_path",
+        "bid_anchor_weight",
+        "bid_q_anchor_weight",
+        "bid_anchor_temperature",
+    ]
+    return {key: getattr(cli_args, key) for key in keys}
+
+
+def _init_wandb(cli_args: argparse.Namespace):
+    if not cli_args.wandb:
+        return None, None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError("W&B logging requested with --wandb, but wandb is not installed") from exc
+    run = wandb.init(
+        project=cli_args.wandb_project,
+        group=cli_args.wandb_group or None,
+        name=cli_args.wandb_run_name or None,
+        mode=cli_args.wandb_mode,
+        config=_wandb_config(cli_args),
+    )
+    return wandb, run
+
+
+def _wandb_artifact_name(cli_args: argparse.Namespace) -> str:
+    if cli_args.wandb_artifact_name:
+        return cli_args.wandb_artifact_name
+    if cli_args.save_path:
+        return os.path.splitext(os.path.basename(cli_args.save_path))[0]
+    return "spades_puffer"
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -394,6 +548,20 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda-buffers", action="store_true", default=False)
     parser.add_argument("--cpu-buffers", action="store_false", dest="cuda_buffers")
     parser.add_argument("--anneal-lr", action="store_true", default=False)
+    parser.add_argument("--active-only-loss", action="store_true", default=False)
+    parser.add_argument("--bid-ppo-weight", type=float, default=1.0)
+    parser.add_argument("--play-ppo-weight", type=float, default=1.0)
+    parser.add_argument("--freeze-bid-heads", action="store_true", default=False)
+    parser.add_argument("--bid-anchor-path", type=str, default="")
+    parser.add_argument("--bid-anchor-weight", type=float, default=0.0)
+    parser.add_argument("--bid-q-anchor-weight", type=float, default=0.0)
+    parser.add_argument("--bid-anchor-temperature", type=float, default=1.0)
+    parser.add_argument("--wandb", action="store_true", default=False)
+    parser.add_argument("--wandb-project", type=str, default="spades-rl")
+    parser.add_argument("--wandb-group", type=str, default="ppo")
+    parser.add_argument("--wandb-run-name", type=str, default="")
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
+    parser.add_argument("--wandb-artifact-name", type=str, default="")
     return parser
 
 
@@ -415,7 +583,20 @@ def _filter_bidding_legal_actions(legal_actions: list[int], max_normal_bid: int)
 
 def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     from pufferlib import pufferl
-    from pufferlib.torch_pufferl import Profile, PuffeRL, _actions_for_vec_step, sample_logits
+    from pufferlib.torch_pufferl import (
+        Profile,
+        PuffeRL,
+        _actions_for_vec_step,
+        compute_puff_advantage,
+        sample_logits,
+    )
+
+    if cli_args.bid_ppo_weight < 0 or cli_args.play_ppo_weight < 0:
+        raise ValueError("PPO phase weights must be non-negative")
+    if cli_args.bid_anchor_weight < 0 or cli_args.bid_q_anchor_weight < 0:
+        raise ValueError("bid anchor weights must be non-negative")
+    if cli_args.bid_anchor_temperature <= 0:
+        raise ValueError("bid anchor temperature must be positive")
 
     class AlignedPuffeRL(PuffeRL):
         """PuffeRL variant that stores step rewards with the sampled action.
@@ -425,6 +606,10 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         sampled. For sparse hand-end rewards in this Python turn env, storing
         the reward after stepping gives much cleaner credit assignment.
         """
+
+        def __init__(self, *args, bid_teacher: SpadesTransformerPolicy | None = None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.bid_teacher = bid_teacher
 
         def rollouts(self):
             prof = self.profile
@@ -475,6 +660,156 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
             self.global_step += self.total_agents * horizon
             self.env_logs = self._vec.log()
 
+        def train(self):
+            prof = self.profile
+            losses = defaultdict(float)
+            counts = defaultdict(float)
+            config = self.config
+            device = self.device
+
+            b0 = config["prio_beta0"]
+            a = config["prio_alpha"]
+            clip_coef = config["clip_coef"]
+            vf_clip = config["vf_clip_coef"]
+            anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
+            self.ratio[:] = 1
+
+            learning_rate = config["learning_rate"]
+            if config["anneal_lr"] and self.epoch > 0:
+                lr_ratio = self.epoch / self.total_epochs
+                lr_min = config["learning_rate"] * config["min_lr_ratio"]
+                learning_rate = lr_min + 0.5 * (learning_rate - lr_min) * (1 + np.cos(np.pi * lr_ratio))
+                self.optimizer.param_groups[0]["lr"] = learning_rate
+
+            obs = self.observations.transpose(0, 1).contiguous()
+            act = self.actions.transpose(0, 1).contiguous()
+            val = self.values.T.contiguous()
+            lp = self.logprobs.T.contiguous()
+            rew = self.rewards.T.contiguous().clamp(-1, 1)
+            ter = self.terminals.T.contiguous()
+
+            prof.mark(0)
+            num_minibatches = int(config["replay_ratio"] * self.batch_size / config["minibatch_size"])
+            for _mb in range(num_minibatches):
+                shape = val.shape
+                advantages = torch.zeros(shape, device=device)
+                advantages = compute_puff_advantage(
+                    val,
+                    rew,
+                    ter,
+                    self.ratio,
+                    advantages,
+                    config["gamma"],
+                    config["gae_lambda"],
+                    config["vtrace_rho_clip"],
+                    config["vtrace_c_clip"],
+                )
+
+                adv = advantages.abs().sum(axis=1)
+                prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
+                prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
+                idx = torch.multinomial(prio_probs, self.minibatch_segments, replacement=True)
+                mb_prio = (self.total_agents * prio_probs[idx, None]) ** -anneal_beta
+
+                mb_obs = obs[idx]
+                mb_actions = act[idx]
+                mb_logprobs = lp[idx]
+                mb_values = val[idx]
+                mb_returns = advantages[idx] + mb_values
+                mb_advantages = advantages[idx]
+
+                prof.mark(1)
+                logits, newvalue = self.policy(mb_obs)
+                _actions, newlogprob, entropy = sample_logits(logits, action=mb_actions)
+                prof.mark(2)
+                prof.elapsed(Profile.TRAIN_FORWARD, 1, 2)
+
+                newlogprob = newlogprob.reshape(mb_logprobs.shape)
+                entropy = entropy.reshape(mb_logprobs.shape)
+                logratio = newlogprob - mb_logprobs
+                ratio = logratio.exp()
+                self.ratio[idx] = ratio.detach()
+
+                weights, active_mask, bid_mask, play_mask = _decision_phase_weights(
+                    mb_obs,
+                    active_only_loss=bool(config["active_only_loss"]),
+                    bid_ppo_weight=float(config["bid_ppo_weight"]),
+                    play_ppo_weight=float(config["play_ppo_weight"]),
+                )
+
+                with torch.no_grad():
+                    old_approx_kl = _weighted_mean(-logratio, weights)
+                    approx_kl = _weighted_mean((ratio - 1) - logratio, weights)
+                    clipfrac = _weighted_mean(
+                        ((ratio - 1.0).abs() > config["clip_coef"]).float(),
+                        weights,
+                    )
+
+                adv = mb_advantages
+                adv = mb_prio * (adv - adv.mean()) / (adv.std() + 1e-8)
+                pg_loss1 = -adv * ratio
+                pg_loss2 = -adv * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+                pg_loss = _weighted_mean(torch.max(pg_loss1, pg_loss2), weights)
+
+                newvalue = newvalue.view(mb_returns.shape)
+                v_clipped = mb_values + torch.clamp(newvalue - mb_values, -vf_clip, vf_clip)
+                v_loss_unclipped = (newvalue - mb_returns) ** 2
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss = 0.5 * _weighted_mean(torch.max(v_loss_unclipped, v_loss_clipped), weights)
+
+                entropy_loss = _weighted_mean(entropy, weights)
+                anchor_kl, anchor_q, anchor_rows = bid_anchor_losses(
+                    self.policy,
+                    self.bid_teacher,
+                    mb_obs,
+                    temperature=float(config["bid_anchor_temperature"]),
+                )
+                loss = (
+                    pg_loss
+                    + config["vf_coef"] * v_loss
+                    - config["ent_coef"] * entropy_loss
+                    + float(config["bid_anchor_weight"]) * anchor_kl
+                    + float(config["bid_q_anchor_weight"]) * anchor_q
+                )
+                val[idx] = newvalue.detach().float()
+
+                losses["policy_loss"] += float(pg_loss.detach().item())
+                losses["value_loss"] += float(v_loss.detach().item())
+                losses["entropy"] += float(entropy_loss.detach().item())
+                losses["old_approx_kl"] += float(old_approx_kl.detach().item())
+                losses["approx_kl"] += float(approx_kl.detach().item())
+                losses["clipfrac"] += float(clipfrac.detach().item())
+                losses["importance"] += float(_weighted_mean(ratio, weights).detach().item())
+                losses["bid_anchor_kl"] += float(anchor_kl.detach().item())
+                losses["bid_q_anchor_loss"] += float(anchor_q.detach().item())
+                counts["active_rows"] += float(active_mask.sum().item())
+                counts["bid_rows"] += float((active_mask & bid_mask).sum().item())
+                counts["play_rows"] += float((active_mask & play_mask).sum().item())
+                counts["ppo_weighted_rows"] += float(weights.sum().item())
+                counts["bid_anchor_rows"] += float(anchor_rows)
+
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), config["max_grad_norm"])
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+            prof.mark(1)
+            prof.elapsed(Profile.TRAIN, 0, 1)
+
+            denom = max(num_minibatches, 1)
+            self.losses = {key: value / denom for key, value in losses.items()}
+            self.losses.update({key: value / denom for key, value in counts.items()})
+            y_pred = val.flatten()
+            y_true = advantages.flatten() + val.flatten()
+            var_y = y_true.var()
+            self.losses["explained_variance"] = (
+                float("nan")
+                if float(var_y.detach().item()) == 0.0
+                else float((1 - (y_true - y_pred).var() / var_y).item())
+            )
+            self.losses["learning_rate"] = float(learning_rate)
+            self.epoch += 1
+
     torch.manual_seed(cli_args.seed)
     np.random.seed(cli_args.seed)
 
@@ -496,18 +831,36 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
     policy = build_policy_from_args(cli_args, vec.obs_size, device)
     if cli_args.load_path:
         load_transformer_state(policy, cli_args.load_path, next(policy.parameters()).device)
+    if cli_args.freeze_bid_heads:
+        freeze_bid_heads(policy)
 
-    trainer = AlignedPuffeRL(args, vec, policy, verbose=False)
+    bid_teacher = None
+    anchor_path = cli_args.bid_anchor_path
+    if not anchor_path and (cli_args.bid_anchor_weight > 0 or cli_args.bid_q_anchor_weight > 0):
+        anchor_path = cli_args.load_path
+    if anchor_path:
+        bid_teacher = build_policy_from_args(cli_args, vec.obs_size, device)
+        load_transformer_state(bid_teacher, anchor_path, next(bid_teacher.parameters()).device)
+        bid_teacher.eval()
+        for param in bid_teacher.parameters():
+            param.requires_grad = False
+    elif cli_args.bid_anchor_weight > 0 or cli_args.bid_q_anchor_weight > 0:
+        raise ValueError("bid anchor weights require --bid-anchor-path or --load-path")
+
+    wandb_module, wandb_run = _init_wandb(cli_args)
+    trainer = AlignedPuffeRL(args, vec, policy, verbose=False, bid_teacher=bid_teacher)
     final_logs: dict[str, Any] = {}
+    history: list[dict[str, Any]] = []
     try:
         while trainer.epoch < trainer.total_epochs:
             trainer.rollouts()
             trainer.train()
             if trainer.epoch % cli_args.log_interval == 0 or trainer.epoch == trainer.total_epochs:
                 final_logs = dict(pufferl.unroll_nested_dict(trainer.log()))
+                history.append(final_logs)
                 print(
                     "epoch={epoch} steps={steps:.0f} sps={sps:.0f} "
-                    "score={score:.4f} hand_score={hand_score:.4f} "
+                    "score={score:.4f} hand_score={hand_score:.4f} bid_kl={bid_kl:.4f} "
                     "episodes={episodes:.0f} hands={hands:.0f} "
                     "matches={matches:.0f} illegal={illegal:.0f}".format(
                         epoch=int(final_logs.get("epoch", trainer.epoch)),
@@ -515,6 +868,7 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                         sps=float(final_logs.get("SPS", 0.0)),
                         score=float(final_logs.get("env/score", 0.0)),
                         hand_score=float(final_logs.get("env/hand_score", 0.0)),
+                        bid_kl=float(final_logs.get("loss/bid_anchor_kl", 0.0)),
                         episodes=float(final_logs.get("env/completed_episodes", 0.0)),
                         hands=float(final_logs.get("env/completed_hands", 0.0)),
                         matches=float(final_logs.get("env/completed_matches", 0.0)),
@@ -522,15 +876,25 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                     ),
                     flush=True,
                 )
+                if wandb_run is not None:
+                    wandb_run.log(final_logs, step=int(final_logs.get("agent_steps", trainer.global_step)))
 
         if cli_args.save_path:
             os.makedirs(os.path.dirname(cli_args.save_path) or ".", exist_ok=True)
             trainer.save_weights(cli_args.save_path)
     finally:
         trainer.close()
+        if wandb_run is not None:
+            if cli_args.save_path and os.path.exists(cli_args.save_path):
+                artifact = wandb_module.Artifact(_wandb_artifact_name(cli_args), type="model")
+                artifact.add_file(cli_args.save_path)
+                wandb_run.log_artifact(artifact)
+            wandb_run.finish()
 
     final_logs["model_path"] = cli_args.save_path
     final_logs["loaded_model_path"] = cli_args.load_path
+    final_logs["bid_anchor_path"] = anchor_path
+    final_logs["history"] = history
     final_logs["completed_at"] = time.time()
     if cli_args.metrics_path:
         os.makedirs(os.path.dirname(cli_args.metrics_path) or ".", exist_ok=True)

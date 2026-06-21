@@ -1,15 +1,18 @@
 from argparse import Namespace
 
 import numpy as np
+import torch
 
 from spades.actions import ACTION_SPACE_SIZE
 from spades.bid_ev_train import (
     BID_ACTION_COUNT,
     BID_ACTION_START,
+    eval_bid_ev_checkpoint,
     load_bid_ev_dataset,
     train_bid_ev,
 )
 from spades.observations import FLAT_OBSERVATION_SIZE
+from spades.policy import SpadesTransformerPolicy
 
 
 def write_tiny_ev_npz(path, rows: int = 6) -> None:
@@ -154,3 +157,89 @@ def test_bid_ev_train_cli_smoke(tmp_path, monkeypatch):
 
     main()
     assert save_path.exists()
+
+
+def test_eval_bid_ev_checkpoint_writes_metrics(tmp_path):
+    dataset_path = tmp_path / "tiny_ev_eval.npz"
+    checkpoint_path = tmp_path / "policy.pt"
+    output_path = tmp_path / "eval.json"
+    write_tiny_ev_npz(dataset_path, rows=4)
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    torch.save(policy.state_dict(), checkpoint_path)
+
+    metrics = eval_bid_ev_checkpoint(
+        Namespace(
+            checkpoint=str(checkpoint_path),
+            dataset=str(dataset_path),
+            batch_size=2,
+            q_scale=100.0,
+            policy_temperature=25.0,
+            q_weight=1.0,
+            policy_weight=1.0,
+            rank_weight=0.1,
+            rank_gap=10.0,
+            rank_margin=0.05,
+            d_model=32,
+            transformer_layers=1,
+            attention_heads=4,
+            ffn_size=64,
+            dropout=0.0,
+            cpu=True,
+            output=str(output_path),
+        )
+    )
+
+    assert output_path.exists()
+    assert metrics["rows"] == 4
+    assert metrics["checkpoint"] == str(checkpoint_path)
+    assert "policy_regret" in metrics
+
+
+def test_bid_ev_eval_cli_smoke(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "tiny_ev_eval_cli.npz"
+    checkpoint_path = tmp_path / "policy_cli.pt"
+    write_tiny_ev_npz(dataset_path, rows=4)
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    torch.save(policy.state_dict(), checkpoint_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "spades-eval-bid-ev",
+            str(checkpoint_path),
+            "--dataset",
+            str(dataset_path),
+            "--batch-size",
+            "2",
+            "--d-model",
+            "32",
+            "--transformer-layers",
+            "1",
+            "--attention-heads",
+            "4",
+            "--ffn-size",
+            "64",
+            "--dropout",
+            "0.0",
+            "--cpu",
+        ],
+    )
+
+    from spades.bid_ev_train import eval_main
+
+    eval_main()

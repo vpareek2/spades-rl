@@ -18,8 +18,11 @@ from spades.policy import (
 )
 from spades.puffer import (
     MASK_OFFSET,
+    _decision_phase_weights,
     SpadesPufferConfig,
     SpadesPufferVecEnv,
+    bid_anchor_losses,
+    freeze_bid_heads,
     pretrain_bidding,
 )
 
@@ -126,6 +129,90 @@ def test_spades_transformer_policy_masks_invalid_logits_and_exposes_heads():
     assert logits[0, 0] < -1.0e8
     assert logits[1, 0] > -1.0e8
     assert logits[1, 52] < -1.0e8
+
+
+def test_phase_weights_can_ignore_inactive_and_bid_rows():
+    obs = torch.zeros(4, FLAT_OBSERVATION_SIZE)
+    obs[0, 0] = 0.0
+    obs[0, 1] = 0.0
+    obs[1, 0] = 1.0
+    obs[1, 1] = 0.0
+    obs[2, 0] = 0.0
+    obs[2, 1] = 2.0
+    obs[3, 0] = 1.0
+    obs[3, 1] = 3.0
+
+    weights, active, bidding, playing = _decision_phase_weights(
+        obs,
+        active_only_loss=True,
+        bid_ppo_weight=0.0,
+        play_ppo_weight=1.0,
+    )
+
+    assert active.tolist() == [True, True, False, False]
+    assert bidding.tolist() == [True, False, True, False]
+    assert playing.tolist() == [False, True, False, True]
+    assert weights.tolist() == [0.0, 1.0, 0.0, 0.0]
+
+
+def test_freeze_bid_heads_keeps_other_modules_trainable():
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+
+    freeze_bid_heads(policy)
+
+    assert not any(param.requires_grad for param in policy.bid_policy_head.parameters())
+    assert not any(param.requires_grad for param in policy.bid_q_head.parameters())
+    assert any(param.requires_grad for param in policy.transformer.parameters())
+    assert any(param.requires_grad for param in policy.play_query.parameters())
+
+
+def test_bid_anchor_loss_matches_identical_teacher_and_ignores_play_rows():
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    teacher = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    teacher.load_state_dict(policy.state_dict())
+    policy.eval()
+    teacher.eval()
+
+    obs = torch.zeros(3, FLAT_OBSERVATION_SIZE)
+    obs[0, 0] = 0.0
+    obs[0, 1] = 0.0
+    obs[0, MASK_OFFSET + 52 : MASK_OFFSET + 55] = 1.0
+    obs[1, 0] = 1.0
+    obs[1, 1] = 0.0
+    obs[1, MASK_OFFSET: MASK_OFFSET + 3] = 1.0
+    obs[2, 0] = 0.0
+    obs[2, 1] = 1.0
+    obs[2, MASK_OFFSET + 52 : MASK_OFFSET + 55] = 1.0
+
+    policy_kl, q_anchor, rows = bid_anchor_losses(policy, teacher, obs, temperature=1.0)
+
+    assert rows == 1
+    assert float(policy_kl.item()) < 1e-6
+    assert float(q_anchor.item()) < 1e-6
 
 
 def test_transformer_checkpoint_loader_rejects_mlp_state(tmp_path):

@@ -27,6 +27,7 @@ spades-eval-duplicate = "spades.eval:duplicate_main"
 spades-generate-bid-ev = "spades.bid_ev:generate_main"
 spades-summarize-bid-ev = "spades.bid_ev:summarize_main"
 spades-train-bid-ev = "spades.bid_ev_train:main"
+spades-eval-bid-ev = "spades.bid_ev_train:eval_main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]
