@@ -6,7 +6,7 @@
 - Confirmed duplicate eval: `+11.17` raw points/hand at 2048 hands, CI `[+10.29, +12.06]`.
 - Do not promote `ppo_play_anchor_ladder_*`: unanchored play PPO drifted badly.
 - Do not promote V3 or unanchored V4: both regressed against conservative duplicate eval.
-- Strong-anchor V4 weight `30.0` is under 2048-hand confirmation now. Promote it only if it beats the V2 2048 result clearly.
+- Do not promote strong-anchor V4 weight `30.0`: it got close at 512 but missed V2 on 2048 confirmation.
 
 ## Results So Far
 
@@ -477,17 +477,70 @@ Interpretation:
 - The best 512-hand result is weight `30.0`, slightly above V2's previous 512-hand result (`+11.42` raw), but the confidence intervals overlap.
 - The label metrics are worse than the lower-anchor sweeps, which is expected: a high behavior anchor intentionally resists matching high-variance labels. The useful signal is the duplicate result, not label top-1.
 
-Current running confirmation:
+2048-hand confirmation:
 
 ```text
 checkpoint: checkpoints/play_ev_v4_team_aware_2k_s4_strong_anchor_w30p0_from_v2.pt
 eval: 2048-hand duplicate against bot:conservative
-output: logs/play_ev_v4_strong_anchor_sweep/duplicate_anchor_w30p0_2048.json
-started: 2026-06-21T23:29Z
-early mean at 260/2048 hands: about +7.9 raw
+raw mean: +10.78
+CI: [+9.92, +11.63]
+contract failures: A=733, B=1096
+illegal actions: 0
 ```
+
+Decision:
+
+- do not promote the strong-anchor V4 checkpoint,
+- keep `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as the current best,
+- the 512-hand result was a useful screen but did not survive 2048 confirmation.
+
+## Play-EV V5 Team-Aware 10k Strong Anchor
+
+Launched a larger team-aware data-scaling run after the V4 strong-anchor no-promotion:
+
+- runner: `scripts/run_play_ev_team_aware_pipeline.sh`
+- run name: `play_ev_v5_team_aware_10k_s4_v2_strong_anchor`
+- base: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- state ally / rollout ally: same V2 checkpoint
+- state opponent / rollout opponent: `bot:conservative`
+- dataset: `data/play_ev_v5_team_aware_10k_s4_v2_strong_anchor.npz`
+- states: `10000`
+- rollout samples: `4`
+- seed: `5205`
+- train mode: `--play-heads-only`
+- LR: `1e-4`
+- epochs: `30`
+- behavior anchor path: V2 checkpoint
+- anchor weights: `10.0`, `30.0`, `100.0`
+- duplicate screening: 512 hands per trained checkpoint
+- log dir: `logs/play_ev_v5_team_aware_10k_s4_v2_strong_anchor/`
+
+Launch command shape:
+
+```bash
+UV_BIN=/home/ubuntu/.local/bin/uv \
+BASE_CHECKPOINT=checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt \
+RUN_NAME=play_ev_v5_team_aware_10k_s4_v2_strong_anchor \
+STATES=10000 \
+ROLLOUT_SAMPLES=4 \
+SEED=5205 \
+WEIGHTS="10.0 30.0 100.0" \
+LEARNING_RATE=0.0001 \
+EPOCHS=30 \
+BATCH_SIZE=512 \
+DUPLICATE_HANDS=512 \
+WANDB=1 \
+WANDB_GROUP=play-ev-v5-team-aware-10k \
+scripts/run_play_ev_team_aware_pipeline.sh
+```
+
+Status:
+
+- started on the A100 at about `2026-06-21T23:40Z`,
+- state collection had reached about `2942/10000` when first checked,
+- expected runtime is roughly 3 hours for dataset generation plus a few minutes for training/eval.
 
 Decision gate:
 
-- If the 2048 result beats V2's `+11.17` raw result clearly, promote the strong-anchor V4 checkpoint.
-- If it lands near or below V2, keep V2 promoted and move to a better data-quality experiment instead of further fitting this 2k dataset.
+- if a V5 checkpoint clearly beats V2's 512-hand result, run 2048 confirmation,
+- otherwise keep V2 as current best and stop scaling this exact team-aware label recipe.
