@@ -68,7 +68,23 @@ Status:
 - A100 run `ppo_play_anchor_playkl_w03_lr3e5` completed successfully.
 - No illegal actions.
 - 8 checkpoints were saved from `32768` through `262144` steps.
-- Evaluation sweep is running under `logs/playkl_w03_eval/`.
+- Evaluation sweep completed under `logs/playkl_w03_eval/`.
+
+512-hand duplicate ranking:
+
+```text
+000262144: +5.56 raw
+000229376: +5.49 raw
+000163840: +5.31 raw
+smoke:     +5.21 raw
+000098304: +5.18 raw
+000196608: +5.17 raw
+000032768: +5.15 raw
+000065536: +4.99 raw
+000131072: +4.91 raw
+```
+
+Interpretation: lower play-KL PPO moved in the right direction late, but the best 512-hand gain over smoke is only about `+0.35` raw points/hand. This does not meet the `+1.0` raw promotion gate, so skip 2048 confirmation for now and spend the A100 on play-EV data.
 
 ## Implementation Direction
 
@@ -149,3 +165,95 @@ Next A100 job should:
 2. generate a small real play-EV dataset,
 3. train a play-head-only model from `ppo_play_anchor_smoke.pt`,
 4. evaluate it on the play-EV dataset and duplicate eval against `bot:conservative`.
+
+Status:
+
+- queued script: `/tmp/spades_play_ev_pipeline.sh`
+- log: `logs/play_ev_v1/pipeline.log`
+- smoke play-EV generation and smoke training completed successfully,
+- real dataset generation `data/play_ev_v1_2k_s4_smoke_state_conservative_rollout.npz` started at `2026-06-21T20:58:35+00:00`,
+- pipeline completed at `2026-06-21T21:04:08+00:00`.
+
+Dataset summary:
+
+```text
+rows: 2000
+rollout_samples: 4
+state_actor: checkpoint:checkpoints/ppo_play_anchor_smoke.pt
+rollout_actor: bot:conservative
+mean_best_ev: 42.54
+mean_best_second_gap: 4.11
+```
+
+Play-EV fit from smoke:
+
+```text
+smoke on dataset:
+  top1: 46.65%
+  regret: 4.48
+  mean_policy_ev: 38.06
+
+play_ev_v1_2k_s4_headonly:
+  top1: 49.75%
+  regret: 3.43
+  mean_policy_ev: 39.11
+```
+
+512-hand duplicate:
+
+```text
+play_ev_v1_2k_s4_headonly: +5.38 raw, CI [+3.59, +7.16]
+smoke baseline in same eval family: about +5.21 raw
+best w03 512: +5.56 raw
+```
+
+Interpretation: play-EV supervision learns its labels and transfers slightly to duplicate eval, but this first dataset/checkpoint is not a clear promotion. Next quick test is to apply the same play-head-only supervised fit starting from the best `w03` checkpoint (`ppo_play_anchor_playkl_w03_lr3e5_000262144.pt`).
+
+## Play-EV From Best W03 Checkpoint
+
+Quick combination test:
+
+- base: `checkpoints/ppo_play_anchor_playkl_w03_lr3e5_000262144.pt`
+- dataset: `data/play_ev_v1_2k_s4_smoke_state_conservative_rollout.npz`
+- output: `checkpoints/play_ev_v1_2k_s4_headonly_from_w03_262144.pt`
+- mode: `--play-heads-only`
+
+Play-EV dataset eval:
+
+```text
+w03 base:
+  top1: 46.35%
+  regret: 4.44
+  mean_policy_ev: 38.11
+
+play_ev_v1_2k_s4_headonly_from_w03_262144:
+  top1: 48.75%
+  regret: 3.57
+  mean_policy_ev: 38.97
+```
+
+512-hand duplicate:
+
+```text
+play_ev_v1_2k_s4_headonly_from_w03_262144: +6.21 raw, CI [+4.34, +8.08]
+contract failures: 211
+illegal actions: 0
+```
+
+Interpretation: this is the first checkpoint to clear the promotion gate against conservative at 512 hands. It combines late protected PPO with supervised play-EV and looks materially better than smoke (`+5.21`) and best raw `w03` (`+5.56`) on 512. Started 2048-hand confirmation at `2026-06-21T21:09:20+00:00`.
+
+2048-hand confirmation:
+
+```text
+play_ev_v1_2k_s4_headonly_from_w03_262144: +6.36 raw, CI [+5.44, +7.27]
+contract failures: A=853, B=911
+illegal actions: 0
+```
+
+Decision:
+
+- promote `checkpoints/play_ev_v1_2k_s4_headonly_from_w03_262144.pt` as the current best checkpoint,
+- keep `checkpoints/ppo_play_anchor_playkl_w03_lr3e5_000262144.pt` as the best PPO-only base,
+- next experiment should use the promoted checkpoint for another play-EV iteration.
+
+Important limitation: current play-EV rollouts use one rollout actor for all four seats. That is not exactly duplicate evaluation, where policy A controls one team and conservative controls the other. The v1 result is still useful, but the next implementation pass should add team-aware state collection/rollout actors for higher-quality labels.
