@@ -173,6 +173,22 @@ uv run spades-eval-puffer checkpoints/spades_curriculum_25m.pt \
   --no-blind-nil
 ```
 
+Run duplicate head-to-head eval against a baseline bot:
+
+```bash
+uv run spades-eval-duplicate \
+  --policy-a checkpoint:artifacts/spades_curriculum_25m_bidbot/checkpoint.pt \
+  --policy-b bot:conservative \
+  --hands 1024 \
+  --max-normal-bid 13 \
+  --nil \
+  --blind-nil \
+  --cpu
+```
+
+Positive `duplicate_margin_mean` means policy A beat policy B after replaying
+each deal with team seats swapped.
+
 The current best checkpoint is preserved in
 `artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`. It scored
 `mean=-0.010721435770392418` over 16,384 greedy hands with normal bids capped at
