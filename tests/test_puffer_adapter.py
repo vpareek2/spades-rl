@@ -21,6 +21,7 @@ from spades.puffer import (
     _decision_phase_weights,
     SpadesPufferConfig,
     SpadesPufferVecEnv,
+    attach_log_history,
     bid_anchor_losses,
     freeze_bid_heads,
     pretrain_bidding,
@@ -213,6 +214,17 @@ def test_bid_anchor_loss_matches_identical_teacher_and_ignores_play_rows():
     assert rows == 1
     assert float(policy_kl.item()) < 1e-6
     assert float(q_anchor.item()) < 1e-6
+
+
+def test_attach_log_history_avoids_circular_final_log_reference():
+    final = {"epoch": 2}
+    history = [{"epoch": 1}, final]
+
+    metrics = attach_log_history(final, history)
+
+    assert metrics is not final
+    assert metrics["history"][1] is not final
+    assert metrics["history"][1] == {"epoch": 2}
 
 
 def test_transformer_checkpoint_loader_rejects_mlp_state(tmp_path):

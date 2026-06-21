@@ -502,6 +502,12 @@ def _wandb_artifact_name(cli_args: argparse.Namespace) -> str:
     return "spades_puffer"
 
 
+def attach_log_history(final_logs: dict[str, Any], history: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics = dict(final_logs)
+    metrics["history"] = [dict(row) for row in history]
+    return metrics
+
+
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Spades with PufferLib's PyTorch PPO backend")
     parser.add_argument("--num-envs", type=int, default=64)
@@ -891,10 +897,10 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
                 wandb_run.log_artifact(artifact)
             wandb_run.finish()
 
+    final_logs = attach_log_history(final_logs, history)
     final_logs["model_path"] = cli_args.save_path
     final_logs["loaded_model_path"] = cli_args.load_path
     final_logs["bid_anchor_path"] = anchor_path
-    final_logs["history"] = history
     final_logs["completed_at"] = time.time()
     if cli_args.metrics_path:
         os.makedirs(os.path.dirname(cli_args.metrics_path) or ".", exist_ok=True)
