@@ -410,3 +410,40 @@ Decision:
 - do not scale this team-aware setup to 10k yet.
 
 Interpretation: the team-aware generator worked mechanically and the supervised fit learned the new labels, but transfer got much worse. Bidding counts are unchanged from the base policy, so the regression is in play decisions. This likely means the one-step team-aware play labels are too high-variance or mismatched with the changed policy's future continuation at this dataset size. Before scaling this path, inspect label quality and training dynamics: try smaller LR, evaluate intermediate epochs, and compare against a holdout duplicate set. Another likely fix is to train from team-aware labels with a stronger behavior anchor to the base play logits rather than pure label fitting.
+
+## Play-EV V4 Behavior Anchor Sweep
+
+Added a behavior-anchor term to `spades-train-play-ev`:
+
+- `--behavior-anchor-path`
+- `--behavior-anchor-weight`
+- `--behavior-anchor-temperature`
+
+The anchor is a KL from the base checkpoint's legal play-action distribution to the student policy's legal play-action distribution. It is intended to prevent the team-aware play-EV fit from moving too far away from the promoted V2 behavior.
+
+Validation:
+
+```text
+uv run ruff check src tests
+uv run pytest
+
+87 passed, 1 warning
+```
+
+Sweep on `data/play_ev_v4_team_aware_2k_s4_v2_vs_conservative.npz`, loaded from `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`:
+
+```text
+weight  label_regret  label_top1  duplicate512_raw  duplicate512_ci95
+0.1     2.57          49.70%      +3.41             [+1.57, +5.25]
+0.3     2.27          48.75%      +8.01             [+6.30, +9.72]
+1.0     2.35          48.95%      +7.33             [+5.55, +9.11]
+3.0     2.48          48.95%      +9.23             [+7.38, +11.07]
+```
+
+Decision:
+
+- do not promote any anchor-sweep checkpoint,
+- keep `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as current best,
+- behavior anchoring helped relative to unanchored V4 (`+3.99` raw), but still did not recover V2's confirmed strength.
+
+Interpretation: stronger anchoring improves transfer, and the best result is the strongest tested anchor. This suggests the team-aware labels may contain useful signal but the supervised update is still too disruptive. Next ablation should push anchor weight higher and/or reduce update size rather than scaling data yet.
