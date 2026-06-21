@@ -2,9 +2,11 @@
 
 ## Current Best
 
-- Keep `checkpoints/ppo_play_anchor_smoke.pt` as the promoted/current-best checkpoint.
+- Current promoted checkpoint: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`.
+- Confirmed duplicate eval: `+11.17` raw points/hand at 2048 hands, CI `[+10.29, +12.06]`.
 - Do not promote `ppo_play_anchor_ladder_*`: unanchored play PPO drifted badly.
-- Do not promote `ppo_play_anchor_playkl_w1_lr3e5_000098304.pt`: play-KL anchoring stabilized PPO, but the 2048-hand duplicate gain over smoke was noise.
+- Do not promote V3 or unanchored V4: both regressed against conservative duplicate eval.
+- Strong-anchor V4 weight `30.0` is under 2048-hand confirmation now. Promote it only if it beats the V2 2048 result clearly.
 
 ## Results So Far
 
@@ -447,3 +449,45 @@ Decision:
 - behavior anchoring helped relative to unanchored V4 (`+3.99` raw), but still did not recover V2's confirmed strength.
 
 Interpretation: stronger anchoring improves transfer, and the best result is the strongest tested anchor. This suggests the team-aware labels may contain useful signal but the supervised update is still too disruptive. Next ablation should push anchor weight higher and/or reduce update size rather than scaling data yet.
+
+## Play-EV V4 Strong Behavior Anchor Sweep
+
+Follow-up sweep on the same team-aware V4 2k/s4 dataset:
+
+- base: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- dataset: `data/play_ev_v4_team_aware_2k_s4_v2_vs_conservative.npz`
+- training mode: `--play-heads-only`
+- LR: `1e-4`
+- epochs: `30`
+- behavior anchor path: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- weights tested: `10.0`, `30.0`, `100.0`
+
+512-hand duplicate results:
+
+```text
+weight  label_regret  label_top1  duplicate512_raw  duplicate512_ci95
+10.0    3.28          44.25%      +11.27            [+9.54, +13.00]
+30.0    3.23          43.95%      +11.58            [+9.80, +13.37]
+100.0   3.33          43.25%      +10.81            [+9.03, +12.59]
+```
+
+Interpretation:
+
+- This is the first V4 team-aware variant to get back to the V2 range.
+- The best 512-hand result is weight `30.0`, slightly above V2's previous 512-hand result (`+11.42` raw), but the confidence intervals overlap.
+- The label metrics are worse than the lower-anchor sweeps, which is expected: a high behavior anchor intentionally resists matching high-variance labels. The useful signal is the duplicate result, not label top-1.
+
+Current running confirmation:
+
+```text
+checkpoint: checkpoints/play_ev_v4_team_aware_2k_s4_strong_anchor_w30p0_from_v2.pt
+eval: 2048-hand duplicate against bot:conservative
+output: logs/play_ev_v4_strong_anchor_sweep/duplicate_anchor_w30p0_2048.json
+started: 2026-06-21T23:29Z
+early mean at 260/2048 hands: about +7.9 raw
+```
+
+Decision gate:
+
+- If the 2048 result beats V2's `+11.17` raw result clearly, promote the strong-anchor V4 checkpoint.
+- If it lands near or below V2, keep V2 promoted and move to a better data-quality experiment instead of further fitting this 2k dataset.
