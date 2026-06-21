@@ -356,3 +356,57 @@ uv run pytest
 
 86 passed, 1 warning
 ```
+
+## Play-EV V4 Team-Aware 2k
+
+First team-aware label run:
+
+- base: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- state ally: `checkpoint:checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- state opponent: `bot:conservative`
+- rollout ally: `checkpoint:checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- rollout opponent: `bot:conservative`
+- dataset: `data/play_ev_v4_team_aware_2k_s4_v2_vs_conservative.npz`
+- output: `checkpoints/play_ev_v4_team_aware_2k_s4_from_v2.pt`
+- mode: `--play-heads-only`
+
+Dataset summary:
+
+```text
+rows: 2000
+rollout samples: 4
+mean_best_ev: 48.27
+mean_best_second_gap: 2.76
+team_aware_state_collection: true
+team_aware_rollouts: true
+```
+
+Dataset eval:
+
+```text
+base on v4 team-aware dataset:
+  top1: 43.45%
+  regret: 3.35
+  mean_policy_ev: 44.92
+
+play_ev_v4_team_aware_2k_s4_from_v2:
+  top1: 50.50%
+  regret: 2.21
+  mean_policy_ev: 46.06
+```
+
+Duplicate eval:
+
+```text
+512 hands: +3.99 raw, CI [+2.20, +5.77]
+contract failures at 512: A=239, B=188
+illegal actions: 0
+```
+
+Decision:
+
+- do not promote V4,
+- keep `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as the current best checkpoint,
+- do not scale this team-aware setup to 10k yet.
+
+Interpretation: the team-aware generator worked mechanically and the supervised fit learned the new labels, but transfer got much worse. Bidding counts are unchanged from the base policy, so the regression is in play decisions. This likely means the one-step team-aware play labels are too high-variance or mismatched with the changed policy's future continuation at this dataset size. Before scaling this path, inspect label quality and training dynamics: try smaller LR, evaluate intermediate epochs, and compare against a holdout duplicate set. Another likely fix is to train from team-aware labels with a stronger behavior anchor to the base play logits rather than pure label fitting.
