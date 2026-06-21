@@ -212,6 +212,15 @@ The EV dataset stores one bidding observation per row plus candidate-bid
 Q-values estimated by rollout. Q-values are unscaled current-team hand score
 deltas, so they can train a bid-Q/policy head directly.
 
+Train the transformer bidding heads from EV labels:
+
+```bash
+uv run spades-train-bid-ev \
+  --dataset data/bid_ev_v1.npz \
+  --save-path checkpoints/bid_ev_transformer_v1.pt \
+  --metrics-path logs/bid_ev_transformer_v1.json
+```
+
 The best pre-public-history/pre-transformer checkpoint is preserved as a
 historical artifact in `artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`.
 It used the legacy MLP policy and flat observation format and will not load on
