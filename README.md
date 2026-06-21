@@ -116,10 +116,13 @@ uv run spades-train-puffer \
   --total-timesteps 1024 \
   --horizon 16 \
   --minibatch-size 64 \
-  --hidden-size 64 \
-  --num-layers 1 \
+  --d-model 64 \
+  --transformer-layers 1 \
+  --attention-heads 4 \
+  --ffn-size 128 \
+  --dropout 0.0 \
   --cuda-buffers \
-  --save-path checkpoints/spades_smoke.pt
+  --save-path checkpoints/transformer_smoke.pt
 ```
 
 By default, PPO episodes terminate at Spades hand boundaries because the
@@ -209,10 +212,11 @@ The EV dataset stores one bidding observation per row plus candidate-bid
 Q-values estimated by rollout. Q-values are unscaled current-team hand score
 deltas, so they can train a bid-Q/policy head directly.
 
-The best pre-public-history checkpoint is preserved as a historical artifact in
-`artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`. It used the legacy flat
-observation format and will not load on branch tips that include public-history
-observation fields. It scored
+The best pre-public-history/pre-transformer checkpoint is preserved as a
+historical artifact in `artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`.
+It used the legacy MLP policy and flat observation format and will not load on
+branch tips that include public-history observation fields or the transformer
+policy. It scored
 `mean=-0.010721435770392418` over 16,384 greedy hands with normal bids capped at
 5, nil disabled, blind nil disabled, and `0` illegal actions. With the full
 action space enabled it scored `mean=-0.025358887389302254` over 4,096 hands and

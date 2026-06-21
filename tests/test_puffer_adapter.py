@@ -2,13 +2,22 @@ import ctypes
 from argparse import Namespace
 
 import numpy as np
+import pytest
 import torch
 
 from spades.actions import ACTION_SPACE_SIZE
 from spades.observations import FLAT_OBSERVATION_SIZE
+from spades.policy import (
+    CARD_TOKEN_COUNT,
+    EVENT_TOKEN_COUNT,
+    SEAT_TOKEN_COUNT,
+    TOKEN_COUNT,
+    FlatObservationTokenizer,
+    SpadesTransformerPolicy,
+    load_transformer_state,
+)
 from spades.puffer import (
     MASK_OFFSET,
-    MaskedSpadesPolicy,
     SpadesPufferConfig,
     SpadesPufferVecEnv,
     pretrain_bidding,
@@ -74,23 +83,66 @@ def test_puffer_vec_env_can_limit_bidding_curriculum():
             assert np.flatnonzero(mask).tolist() == [0]
 
 
-def test_masked_spades_policy_masks_invalid_logits():
-    policy = MaskedSpadesPolicy(FLAT_OBSERVATION_SIZE, ACTION_SPACE_SIZE, hidden_size=32, num_layers=1)
+def test_transformer_tokenizer_shapes():
+    vec = SpadesPufferVecEnv(SpadesPufferConfig(num_envs=1, seed=9))
+    tokenizer = FlatObservationTokenizer(d_model=32, dropout=0.0)
+    obs = torch.from_numpy(vec._obs[:1])
+
+    tokenized = tokenizer(obs)
+
+    assert tokenized["tokens"].shape == (1, TOKEN_COUNT, 32)
+    assert tokenized["card_token_slice"].stop - tokenized["card_token_slice"].start == CARD_TOKEN_COUNT
+    assert tokenized["seat_token_slice"].stop - tokenized["seat_token_slice"].start == SEAT_TOKEN_COUNT
+    assert TOKEN_COUNT == 1 + CARD_TOKEN_COUNT + EVENT_TOKEN_COUNT + SEAT_TOKEN_COUNT
+
+
+def test_spades_transformer_policy_masks_invalid_logits_and_exposes_heads():
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
     obs = torch.zeros(2, FLAT_OBSERVATION_SIZE)
     obs[0, MASK_OFFSET + 52] = 1.0
     obs[0, MASK_OFFSET + 65] = 1.0
     obs[1, MASK_OFFSET + 0] = 1.0
 
     logits, values, state = policy.forward_eval(obs, ())
+    heads = policy.forward_heads(obs)
 
     assert state == ()
     assert logits.shape == (2, ACTION_SPACE_SIZE)
     assert values.shape == (2, 1)
+    assert heads["bid_q"].shape == (2, 15)
+    assert heads["margin_value"].shape == (2, 1)
+    assert heads["hidden_owner_logits"].shape == (2, 52, 4)
+    assert heads["void_logits"].shape == (2, 4, 4)
     assert logits[0, 52] > -1.0e8
     assert logits[0, 65] > -1.0e8
     assert logits[0, 0] < -1.0e8
     assert logits[1, 0] > -1.0e8
     assert logits[1, 52] < -1.0e8
+
+
+def test_transformer_checkpoint_loader_rejects_mlp_state(tmp_path):
+    checkpoint = tmp_path / "old_mlp.pt"
+    torch.save({"encoder.0.weight": torch.zeros(1)}, checkpoint)
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="Pre-transformer MLP checkpoints"):
+        load_transformer_state(policy, str(checkpoint), "cpu")
 
 
 def test_puffer_bidding_pretrain_smoke(tmp_path):
@@ -102,8 +154,11 @@ def test_puffer_bidding_pretrain_smoke(tmp_path):
             samples=16,
             batch_size=8,
             learning_rate=0.001,
-            hidden_size=32,
-            num_layers=1,
+            d_model=32,
+            transformer_layers=1,
+            attention_heads=4,
+            ffn_size=64,
+            dropout=0.0,
             seed=5,
             max_normal_bid=5,
             nil=False,

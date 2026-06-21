@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from torch import nn
 from torch.nn import functional as F
 
 from spades.actions import ACTION_SPACE_SIZE
@@ -22,6 +21,7 @@ from spades.bots import ConservativeBidBot
 from spades.config import SpadesPlusConfig
 from spades.env import IllegalActionError, SpadesPlusEnv
 from spades.observations import FLAT_OBSERVATION_SIZE, flatten_observation
+from spades.policy import SpadesTransformerPolicy, load_transformer_state
 from spades.state import Phase
 
 
@@ -299,44 +299,16 @@ class SpadesPufferVecEnv:
         self._gpu_terminals = None
 
 
-class MaskedSpadesPolicy(nn.Module):
-    """Small MLP policy that applies the flattened Spades action mask."""
-
-    def __init__(self, obs_size: int, action_size: int, hidden_size: int = 256, num_layers: int = 2):
-        super().__init__()
-        layers: list[nn.Module] = []
-        in_size = obs_size
-        for _ in range(num_layers):
-            layers.extend([nn.Linear(in_size, hidden_size), nn.GELU()])
-            in_size = hidden_size
-        self.encoder = nn.Sequential(*layers)
-        self.action_head = nn.Linear(hidden_size, action_size)
-        self.value_head = nn.Linear(hidden_size, 1)
-
-    def initial_state(self, batch_size: int, device: str | torch.device):
-        return ()
-
-    def forward_eval(self, observations: torch.Tensor, state=()):
-        logits, values = self._forward_flat(observations)
-        return logits, values, state
-
-    def forward(self, observations: torch.Tensor):
-        batch, horizon = observations.shape[:2]
-        flat_obs = observations.reshape(batch * horizon, observations.shape[-1])
-        logits, values = self._forward_flat(flat_obs)
-        return logits, values.reshape(batch, horizon)
-
-    def _forward_flat(self, observations: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        x = observations.float()
-        hidden = self.encoder(x)
-        logits = self.action_head(hidden)
-        mask = x[:, MASK_OFFSET : MASK_OFFSET + ACTION_SPACE_SIZE] > 0.5
-        fallback = torch.zeros_like(mask)
-        fallback[:, 0] = True
-        mask = torch.where(mask.any(dim=1, keepdim=True), mask, fallback)
-        logits = logits.masked_fill(~mask, -1.0e9)
-        values = self.value_head(hidden)
-        return logits, values
+def build_policy_from_args(args: argparse.Namespace, obs_size: int, device: str | torch.device) -> SpadesTransformerPolicy:
+    return SpadesTransformerPolicy(
+        obs_size=obs_size,
+        action_size=ACTION_SPACE_SIZE,
+        d_model=args.d_model,
+        num_layers=args.transformer_layers,
+        num_heads=args.attention_heads,
+        ffn_size=args.ffn_size,
+        dropout=args.dropout,
+    ).to(device)
 
 
 def build_train_args(cli_args: argparse.Namespace) -> dict[str, Any]:
@@ -397,8 +369,11 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vtrace-c-clip", type=float, default=1.0)
     parser.add_argument("--prio-alpha", type=float, default=0.8)
     parser.add_argument("--prio-beta0", type=float, default=0.2)
-    parser.add_argument("--hidden-size", type=int, default=256)
-    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--d-model", type=int, default=256)
+    parser.add_argument("--transformer-layers", type=int, default=6)
+    parser.add_argument("--attention-heads", type=int, default=8)
+    parser.add_argument("--ffn-size", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps-per-match", type=int, default=5000)
     parser.add_argument("--reward-scale", type=float, default=0.01)
@@ -516,15 +491,10 @@ def train(cli_args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     args = build_train_args(cli_args)
-    policy = MaskedSpadesPolicy(
-        obs_size=vec.obs_size,
-        action_size=ACTION_SPACE_SIZE,
-        hidden_size=cli_args.hidden_size,
-        num_layers=cli_args.num_layers,
-    ).to("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    policy = build_policy_from_args(cli_args, vec.obs_size, device)
     if cli_args.load_path:
-        state_dict = torch.load(cli_args.load_path, map_location=next(policy.parameters()).device)
-        policy.load_state_dict(state_dict)
+        load_transformer_state(policy, cli_args.load_path, next(policy.parameters()).device)
 
     trainer = AlignedPuffeRL(args, vec, policy, verbose=False)
     final_logs: dict[str, Any] = {}
@@ -576,14 +546,8 @@ def main() -> None:
 
 def evaluate_policy(args: argparse.Namespace) -> dict[str, Any]:
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
-    policy = MaskedSpadesPolicy(
-        FLAT_OBSERVATION_SIZE,
-        ACTION_SPACE_SIZE,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-    ).to(device)
-    state_dict = torch.load(args.checkpoint, map_location=device)
-    policy.load_state_dict(state_dict)
+    policy = build_policy_from_args(args, FLAT_OBSERVATION_SIZE, device)
+    load_transformer_state(policy, args.checkpoint, device)
     policy.eval()
 
     env_config = SpadesPlusConfig(
@@ -652,8 +616,11 @@ def make_eval_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate a Spades Puffer checkpoint greedily")
     parser.add_argument("checkpoint", type=str)
     parser.add_argument("--hands", type=int, default=1024)
-    parser.add_argument("--hidden-size", type=int, default=256)
-    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--d-model", type=int, default=256)
+    parser.add_argument("--transformer-layers", type=int, default=6)
+    parser.add_argument("--attention-heads", type=int, default=8)
+    parser.add_argument("--ffn-size", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--reward-scale", type=float, default=0.01)
     parser.add_argument("--max-normal-bid", type=int, default=13)
@@ -715,19 +682,15 @@ def pretrain_bidding(args: argparse.Namespace) -> dict[str, Any]:
     np.random.seed(args.seed)
 
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
-    policy = MaskedSpadesPolicy(
-        FLAT_OBSERVATION_SIZE,
-        ACTION_SPACE_SIZE,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-    ).to(device)
+    policy = build_policy_from_args(args, FLAT_OBSERVATION_SIZE, device)
     if args.load_path:
-        state_dict = torch.load(args.load_path, map_location=device)
-        policy.load_state_dict(state_dict)
+        load_transformer_state(policy, args.load_path, device)
 
     if args.freeze_encoder:
-        for param in policy.encoder.parameters():
-            param.requires_grad = False
+        encoder_modules = (policy.tokenizer, policy.transformer, policy.final_norm)
+        for module in encoder_modules:
+            for param in module.parameters():
+                param.requires_grad = False
 
     trainable_params = [param for param in policy.parameters() if param.requires_grad]
     if not trainable_params:
@@ -812,8 +775,11 @@ def make_pretrain_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples", type=int, default=131_072)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--learning-rate", type=float, default=0.001)
-    parser.add_argument("--hidden-size", type=int, default=256)
-    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--d-model", type=int, default=256)
+    parser.add_argument("--transformer-layers", type=int, default=6)
+    parser.add_argument("--attention-heads", type=int, default=8)
+    parser.add_argument("--ffn-size", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-normal-bid", type=int, default=13)
     parser.add_argument("--nil", action="store_true", default=True)

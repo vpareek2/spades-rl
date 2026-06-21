@@ -22,10 +22,10 @@ from spades.config import SpadesPlusConfig
 from spades.env import SpadesPlusEnv
 from spades.observations import FLAT_OBSERVATION_SIZE, flatten_observation
 from spades.puffer import (
-    MaskedSpadesPolicy,
     _filter_bidding_legal_actions,
     _filter_bidding_mask,
 )
+from spades.policy import SpadesTransformerPolicy, load_transformer_state
 from spades.state import BidKind, Phase
 
 
@@ -45,19 +45,24 @@ class CheckpointActor:
     name: str
     checkpoint: str
     max_normal_bid: int
-    hidden_size: int = 256
-    num_layers: int = 2
+    d_model: int = 256
+    transformer_layers: int = 6
+    attention_heads: int = 8
+    ffn_size: int = 1024
+    dropout: float = 0.05
     device: str = "cpu"
 
     def __post_init__(self) -> None:
-        self.policy = MaskedSpadesPolicy(
+        self.policy = SpadesTransformerPolicy(
             FLAT_OBSERVATION_SIZE,
             ACTION_SPACE_SIZE,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
+            d_model=self.d_model,
+            num_layers=self.transformer_layers,
+            num_heads=self.attention_heads,
+            ffn_size=self.ffn_size,
+            dropout=self.dropout,
         ).to(self.device)
-        state_dict = torch.load(self.checkpoint, map_location=self.device)
-        self.policy.load_state_dict(state_dict)
+        load_transformer_state(self.policy, self.checkpoint, self.device)
         self.policy.eval()
 
     def act(
@@ -312,8 +317,11 @@ def make_actor(
     *,
     label: str,
     max_normal_bid: int,
-    hidden_size: int,
-    num_layers: int,
+    d_model: int,
+    transformer_layers: int,
+    attention_heads: int,
+    ffn_size: int,
+    dropout: float,
     device: str,
 ) -> Actor:
     if descriptor.startswith("checkpoint:"):
@@ -322,8 +330,11 @@ def make_actor(
             name=descriptor,
             checkpoint=path,
             max_normal_bid=max_normal_bid,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
+            d_model=d_model,
+            transformer_layers=transformer_layers,
+            attention_heads=attention_heads,
+            ffn_size=ffn_size,
+            dropout=dropout,
             device=device,
         )
 
@@ -354,8 +365,11 @@ def make_duplicate_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-nil", action="store_false", dest="nil")
     parser.add_argument("--blind-nil", action="store_true", default=True)
     parser.add_argument("--no-blind-nil", action="store_false", dest="blind_nil")
-    parser.add_argument("--hidden-size", type=int, default=256)
-    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--d-model", type=int, default=256)
+    parser.add_argument("--transformer-layers", type=int, default=6)
+    parser.add_argument("--attention-heads", type=int, default=8)
+    parser.add_argument("--ffn-size", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.05)
     parser.add_argument("--reward-scale", type=float, default=0.01)
     parser.add_argument("--cpu", action="store_true", default=False)
     parser.add_argument("--output", type=str, default="")
@@ -374,16 +388,22 @@ def duplicate_main() -> None:
         args.policy_a,
         label="policy-a",
         max_normal_bid=args.max_normal_bid,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
+        d_model=args.d_model,
+        transformer_layers=args.transformer_layers,
+        attention_heads=args.attention_heads,
+        ffn_size=args.ffn_size,
+        dropout=args.dropout,
         device=device,
     )
     actor_b = make_actor(
         args.policy_b,
         label="policy-b",
         max_normal_bid=args.max_normal_bid,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
+        d_model=args.d_model,
+        transformer_layers=args.transformer_layers,
+        attention_heads=args.attention_heads,
+        ffn_size=args.ffn_size,
+        dropout=args.dropout,
         device=device,
     )
     metrics = evaluate_duplicate(
