@@ -13,6 +13,7 @@ from spades.play_ev import (
     replay_previous_plays,
     summarize_play_ev,
 )
+from spades.rules import player_team
 from spades.state import Phase
 
 
@@ -46,7 +47,27 @@ def test_reconstructed_play_env_matches_source_state():
 
     assert env.phase == Phase.PLAYING
     assert env.current_player() == state.acting_player
+    assert state.target_team == player_team(state.acting_player)
     assert env.legal_actions() == state.legal_actions
+
+
+def test_team_aware_collection_only_keeps_ally_team_states():
+    ally = _bot_actor("bot:lowest")
+    opponent = _bot_actor("bot:highest")
+
+    states = collect_play_states(
+        count=6,
+        seed=13,
+        state_actor=ally,
+        state_opponent_actor=opponent,
+        max_normal_bid=13,
+        nil=False,
+        blind_nil=False,
+        progress=False,
+    )
+
+    assert len(states) == 6
+    assert all(player_team(state.acting_player) == state.target_team for state in states)
 
 
 def test_replay_previous_plays_rejects_hand_completion():
@@ -81,7 +102,8 @@ def test_play_candidate_evaluation_uses_rollout_samples():
     mean, std, visits = evaluate_play_candidate_action(
         state,
         state.legal_actions[0],
-        actor,
+        rollout_ally_actor=actor,
+        rollout_opponent_actor=_bot_actor("bot:highest"),
         rollout_samples=2,
         max_normal_bid=13,
         nil=False,
@@ -103,7 +125,11 @@ def test_generate_play_ev_dataset_npz_shapes_and_summary(tmp_path):
             rollout_samples=2,
             seed=123,
             state_actor="bot:conservative",
+            state_ally_actor="",
+            state_opponent_actor="",
             rollout_actor="bot:conservative",
+            rollout_ally_actor="",
+            rollout_opponent_actor="",
             max_normal_bid=13,
             nil=False,
             blind_nil=False,
@@ -132,6 +158,7 @@ def test_generate_play_ev_dataset_npz_shapes_and_summary(tmp_path):
     assert data["visit_counts"].shape == (4, ACTION_SPACE_SIZE)
     assert data["best_action"].shape == (4,)
     assert data["acting_player"].shape == (4,)
+    assert data["target_team"].shape == (4,)
     assert data["dealer"].shape == (4,)
     assert data["previous_bid_actions"].shape == (4, 4)
     assert data["previous_play_actions"].shape == (4, 52)
@@ -141,6 +168,44 @@ def test_generate_play_ev_dataset_npz_shapes_and_summary(tmp_path):
     reloaded_summary = summarize_play_ev(str(output))
     assert reloaded_summary["rows"] == 4
     assert reloaded_summary["metadata"]["rollout_samples"] == 2
+    assert reloaded_summary["metadata"]["team_aware_rollouts"] is False
+
+
+def test_generate_team_aware_play_ev_dataset_metadata(tmp_path):
+    output = tmp_path / "team_play_ev.npz"
+
+    summary = generate_play_ev_dataset(
+        Namespace(
+            states=3,
+            rollout_samples=1,
+            seed=124,
+            state_actor="bot:lowest",
+            state_ally_actor="",
+            state_opponent_actor="bot:highest",
+            rollout_actor="bot:lowest",
+            rollout_ally_actor="",
+            rollout_opponent_actor="bot:highest",
+            max_normal_bid=13,
+            nil=False,
+            blind_nil=False,
+            d_model=32,
+            transformer_layers=1,
+            attention_heads=4,
+            ffn_size=64,
+            dropout=0.0,
+            device="cpu",
+            progress=False,
+            output=str(output),
+        )
+    )
+
+    data = np.load(output, allow_pickle=False)
+    assert output.exists()
+    assert data["target_team"].shape == (3,)
+    assert summary["metadata"]["team_aware_state_collection"] is True
+    assert summary["metadata"]["team_aware_rollouts"] is True
+    assert summary["metadata"]["state_opponent_actor"] == "bot:highest"
+    assert summary["metadata"]["rollout_opponent_actor"] == "bot:highest"
 
 
 def test_play_ev_cli_smoke(tmp_path, monkeypatch):

@@ -28,6 +28,7 @@ class PlayState:
     observation: np.ndarray
     legal_actions: list[int]
     acting_player: int
+    target_team: int
     dealer: int
     hands: list[list[int]]
     team_scores: list[int]
@@ -83,6 +84,8 @@ def collect_play_states(
     count: int,
     seed: int,
     state_actor: Actor,
+    state_ally_actor: Actor | None = None,
+    state_opponent_actor: Actor | None = None,
     max_normal_bid: int,
     nil: bool,
     blind_nil: bool,
@@ -91,8 +94,11 @@ def collect_play_states(
     rng = np.random.default_rng(seed)
     states: list[PlayState] = []
     deal_idx = 0
+    team_aware = state_opponent_actor is not None
+    ally_actor = state_ally_actor or state_actor
     with tqdm(total=count, desc="Collect play states", disable=not progress) as bar:
         while len(states) < count:
+            target_team = deal_idx % 2
             env = SpadesPlusEnv(
                 SpadesPlusConfig(
                     nil_enabled=nil,
@@ -113,12 +119,16 @@ def collect_play_states(
             while len(states) < count:
                 obs = env.observe()
                 legal = _legal_actions_for_generation(env, max_normal_bid)
-                if env.phase == Phase.PLAYING:
+                acting_player = env.current_player()
+                acting_team = player_team(acting_player)
+                should_collect = not team_aware or acting_team == target_team
+                if env.phase == Phase.PLAYING and should_collect:
                     states.append(
                         PlayState(
                             observation=flatten_observation(obs).astype(np.float32),
                             legal_actions=list(legal),
-                            acting_player=env.current_player(),
+                            acting_player=acting_player,
+                            target_team=acting_team,
                             dealer=dealer,
                             hands=[list(hand) for hand in initial_hands],
                             team_scores=list(team_scores),
@@ -129,7 +139,12 @@ def collect_play_states(
                     )
                     bar.update(1)
 
-                action = int(state_actor.act(obs, legal, rng))
+                actor = state_actor
+                if team_aware:
+                    actor = ally_actor if acting_team == target_team else state_opponent_actor
+                    if actor is None:
+                        raise RuntimeError("state_opponent_actor is required for team-aware collection")
+                action = int(actor.act(obs, legal, rng))
                 if action not in legal:
                     action = int(legal[0])
                 if env.phase == Phase.BIDDING:
@@ -182,17 +197,47 @@ def _complete_hand_with_actor(
             return info
 
 
+def _complete_hand_with_team_actors(
+    env: SpadesPlusEnv,
+    ally_actor: Actor,
+    opponent_actor: Actor,
+    target_team: int,
+    rng: np.random.Generator,
+    max_normal_bid: int,
+) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    while True:
+        obs = env.observe()
+        legal = _legal_actions_for_generation(env, max_normal_bid)
+        actor = ally_actor if player_team(env.current_player()) == target_team else opponent_actor
+        action = int(actor.act(obs, legal, rng))
+        if action not in legal:
+            action = int(legal[0])
+        _obs, _rewards, terminated, truncated, info = env.step(action)
+        if info.get("hand_completed") or terminated or truncated:
+            return info
+
+
 def evaluate_play_candidate_action(
     state: PlayState,
     candidate_action: int,
-    rollout_actor: Actor,
+    rollout_actor: Actor | None = None,
     *,
+    rollout_ally_actor: Actor | None = None,
+    rollout_opponent_actor: Actor | None = None,
     rollout_samples: int,
     max_normal_bid: int,
     nil: bool,
     blind_nil: bool,
     seed: int,
 ) -> tuple[float, float, int]:
+    if rollout_ally_actor is None:
+        if rollout_actor is None:
+            raise ValueError("rollout_actor or rollout_ally_actor is required")
+        rollout_ally_actor = rollout_actor
+    if rollout_opponent_actor is None:
+        rollout_opponent_actor = rollout_actor or rollout_ally_actor
+
     values: list[float] = []
     actor_team = player_team(state.acting_player)
     for sample_idx in range(rollout_samples):
@@ -203,7 +248,14 @@ def evaluate_play_candidate_action(
         _obs, _rewards, terminated, truncated, info = env.step(int(candidate_action))
         if not (info.get("hand_completed") or terminated or truncated):
             rng = np.random.default_rng(seed + sample_idx)
-            info = _complete_hand_with_actor(env, rollout_actor, rng, max_normal_bid)
+            info = _complete_hand_with_team_actors(
+                env,
+                rollout_ally_actor,
+                rollout_opponent_actor,
+                state.target_team,
+                rng,
+                max_normal_bid,
+            )
         values.append(float(info["team_score_delta"][actor_team]))
     if not values:
         return 0.0, 0.0, 0
@@ -220,6 +272,10 @@ def _metadata(args: argparse.Namespace) -> dict[str, Any]:
         ).strip()
     except Exception:
         commit = ""
+    state_ally_actor = getattr(args, "state_ally_actor", "") or args.state_actor
+    state_opponent_actor = getattr(args, "state_opponent_actor", "")
+    rollout_ally_actor = getattr(args, "rollout_ally_actor", "") or args.rollout_actor
+    rollout_opponent_actor = getattr(args, "rollout_opponent_actor", "") or args.rollout_actor
     return {
         "git_commit": commit,
         "observation_size": FLAT_OBSERVATION_SIZE,
@@ -228,7 +284,13 @@ def _metadata(args: argparse.Namespace) -> dict[str, Any]:
         "rollout_samples": args.rollout_samples,
         "seed": args.seed,
         "state_actor": args.state_actor,
+        "state_ally_actor": state_ally_actor,
+        "state_opponent_actor": state_opponent_actor,
         "rollout_actor": args.rollout_actor,
+        "rollout_ally_actor": rollout_ally_actor,
+        "rollout_opponent_actor": rollout_opponent_actor,
+        "team_aware_state_collection": bool(state_opponent_actor),
+        "team_aware_rollouts": rollout_ally_actor != rollout_opponent_actor,
         "max_normal_bid": args.max_normal_bid,
         "nil": args.nil,
         "blind_nil": args.blind_nil,
@@ -246,8 +308,13 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("output is required")
 
     device = "cuda" if args.device == "cuda" else "cpu"
+    state_ally_descriptor = getattr(args, "state_ally_actor", "") or args.state_actor
+    state_opponent_descriptor = getattr(args, "state_opponent_actor", "")
+    rollout_ally_descriptor = getattr(args, "rollout_ally_actor", "") or args.rollout_actor
+    rollout_opponent_descriptor = getattr(args, "rollout_opponent_actor", "") or args.rollout_actor
+
     state_actor = _descriptor_actor(
-        args.state_actor,
+        state_ally_descriptor,
         max_normal_bid=args.max_normal_bid,
         d_model=args.d_model,
         transformer_layers=args.transformer_layers,
@@ -256,8 +323,32 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
         dropout=args.dropout,
         device=device,
     )
-    rollout_actor = _descriptor_actor(
-        args.rollout_actor,
+    state_opponent_actor = (
+        _descriptor_actor(
+            state_opponent_descriptor,
+            max_normal_bid=args.max_normal_bid,
+            d_model=args.d_model,
+            transformer_layers=args.transformer_layers,
+            attention_heads=args.attention_heads,
+            ffn_size=args.ffn_size,
+            dropout=args.dropout,
+            device=device,
+        )
+        if state_opponent_descriptor
+        else None
+    )
+    rollout_ally_actor = _descriptor_actor(
+        rollout_ally_descriptor,
+        max_normal_bid=args.max_normal_bid,
+        d_model=args.d_model,
+        transformer_layers=args.transformer_layers,
+        attention_heads=args.attention_heads,
+        ffn_size=args.ffn_size,
+        dropout=args.dropout,
+        device=device,
+    )
+    rollout_opponent_actor = _descriptor_actor(
+        rollout_opponent_descriptor,
         max_normal_bid=args.max_normal_bid,
         d_model=args.d_model,
         transformer_layers=args.transformer_layers,
@@ -271,6 +362,7 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
         count=args.states,
         seed=args.seed,
         state_actor=state_actor,
+        state_opponent_actor=state_opponent_actor,
         max_normal_bid=args.max_normal_bid,
         nil=args.nil,
         blind_nil=args.blind_nil,
@@ -285,6 +377,7 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
     visit_counts = np.zeros((args.states, ACTION_SPACE_SIZE), dtype=np.int32)
     best_action = np.full(args.states, -1, dtype=np.int16)
     acting_player = np.zeros(args.states, dtype=np.int8)
+    target_team = np.zeros(args.states, dtype=np.int8)
     dealer = np.zeros(args.states, dtype=np.int8)
     previous_bid_actions = np.full((args.states, 4), -1, dtype=np.int16)
     previous_play_actions = np.full((args.states, 52), -1, dtype=np.int16)
@@ -292,6 +385,7 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
     for idx, state in enumerate(tqdm(states, desc="Evaluate play EV", disable=not args.progress)):
         observations[idx] = state.observation
         acting_player[idx] = state.acting_player
+        target_team[idx] = state.target_team
         dealer[idx] = state.dealer
         for bid_idx, action in enumerate(state.previous_bid_actions[:4]):
             previous_bid_actions[idx, bid_idx] = action
@@ -304,7 +398,8 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
             mean, std, visits = evaluate_play_candidate_action(
                 state,
                 action,
-                rollout_actor,
+                rollout_ally_actor=rollout_ally_actor,
+                rollout_opponent_actor=rollout_opponent_actor,
                 rollout_samples=args.rollout_samples,
                 max_normal_bid=args.max_normal_bid,
                 nil=args.nil,
@@ -333,6 +428,7 @@ def generate_play_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
         visit_counts=visit_counts,
         best_action=best_action,
         acting_player=acting_player,
+        target_team=target_team,
         dealer=dealer,
         previous_bid_actions=previous_bid_actions,
         previous_play_actions=previous_play_actions,
@@ -389,7 +485,11 @@ def make_generate_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rollout-samples", type=int, default=8)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--state-actor", type=str, default="bot:conservative")
+    parser.add_argument("--state-ally-actor", type=str, default="")
+    parser.add_argument("--state-opponent-actor", type=str, default="")
     parser.add_argument("--rollout-actor", type=str, default="bot:conservative")
+    parser.add_argument("--rollout-ally-actor", type=str, default="")
+    parser.add_argument("--rollout-opponent-actor", type=str, default="")
     parser.add_argument("--max-normal-bid", type=int, default=13)
     parser.add_argument("--nil", action="store_true", default=True)
     parser.add_argument("--no-nil", action="store_false", dest="nil")

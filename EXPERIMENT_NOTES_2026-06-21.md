@@ -297,3 +297,62 @@ Decision:
 - promote `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as the current best checkpoint,
 - this is a large confirmed improvement over v1 (`+6.36` raw at 2048) and smoke (`~+4.34` raw at 2048 from earlier confirmation),
 - continue with another self-iteration using the v2 checkpoint as state actor/base while keeping the known limitation about single-actor rollouts in mind.
+
+## Play-EV V3 From Promoted V2 Checkpoint
+
+Third play-EV iteration:
+
+- base: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- state actor: `checkpoint:checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- rollout actor: `bot:conservative`
+- dataset: `data/play_ev_v3_10k_s4_v2_state_conservative_rollout.npz`
+- output: `checkpoints/play_ev_v3_10k_s4_headonly_from_v2.pt`
+- mode: `--play-heads-only`
+
+Dataset eval:
+
+```text
+base on v3 dataset:
+  top1: 46.18%
+  regret: 4.21
+  mean_policy_ev: 38.25
+
+play_ev_v3_10k_s4_headonly_from_v2:
+  top1: 46.37%
+  regret: 4.16
+  mean_policy_ev: 38.31
+```
+
+Duplicate eval:
+
+```text
+512 hands: +10.00 raw, CI [+8.09, +11.92]
+contract failures at 512: A=190, B=284
+illegal actions: 0
+```
+
+Decision:
+
+- do not promote V3,
+- keep `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as the current best checkpoint,
+- skip 2048 confirmation because V3 did not clear the `+10.5` raw 512-hand gate and is below V2's `+11.42` 512-hand result.
+
+Interpretation: naive self-iteration appears to be plateauing. V3 improved only slightly on its own play-EV dataset and regressed in duplicate eval. The next implementation step should fix label quality by making play-EV rollouts team-aware: when evaluating a candidate action for the learning policy's team, complete the hand with the policy actor on that team and the opponent actor on the other team, matching duplicate eval more closely.
+
+## Team-Aware Play-EV Generator
+
+Implemented support for duplicate-style play-EV labels:
+
+- `spades-generate-play-ev` now accepts `--state-ally-actor`, `--state-opponent-actor`, `--rollout-ally-actor`, and `--rollout-opponent-actor`.
+- Team-aware state collection alternates the ally team by deal and stores only states where the acting player belongs to that ally team.
+- Candidate-action rollouts now complete the acting player's team with the ally actor and the other team with the opponent actor.
+- Datasets now include `target_team` plus metadata flags for team-aware state collection and rollouts.
+
+Validation:
+
+```text
+uv run ruff check src tests
+uv run pytest
+
+86 passed, 1 warning
+```
