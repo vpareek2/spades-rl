@@ -1,11 +1,13 @@
 # Spades Puffer Checkpoint
 
 This directory contains the best checkpoint from the first PufferLib training
-pass on the A6000 cloud instance.
+pass on the A6000 cloud instance. It is a historical artifact using the legacy
+flat observation format before public-history fields were added.
 
 ## Files
 
-- `checkpoint.pt`: masked Puffer policy weights.
+- `checkpoint.pt`: masked Puffer policy weights for the legacy observation
+  shape.
 - `pretrain_metrics.json`: supervised bidding bootstrap metrics.
 - `eval_curriculum_16384_cpu.json`: greedy eval with normal bids capped at 5,
   nil disabled, and blind nil disabled.
@@ -25,7 +27,8 @@ The checkpoint SHA-256 is:
 7d0c0ea796ea4e1b1ebb0c8c9a15f962ff8a55c3e03ef3ceeaea0267fabb255e
 ```
 
-Re-run the curriculum eval:
+Re-run the curriculum eval from a commit before the public-history observation
+change:
 
 ```bash
 uv run spades-eval-puffer artifacts/spades_curriculum_25m_bidbot/checkpoint.pt \
@@ -36,7 +39,8 @@ uv run spades-eval-puffer artifacts/spades_curriculum_25m_bidbot/checkpoint.pt \
   --cpu
 ```
 
-Re-run the full-action eval:
+Re-run the full-action eval from a commit before the public-history observation
+change:
 
 ```bash
 uv run spades-eval-puffer artifacts/spades_curriculum_25m_bidbot/checkpoint.pt \

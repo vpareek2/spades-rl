@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from spades.actions import ACTION_SPACE_SIZE, BLIND_NIL_ACTION, NIL_ACTION
+from spades.cards import SPADES
 from spades.config import SpadesPlusConfig
 from spades.env import IllegalActionError, SpadesPlusEnv
 from spades.observations import FLAT_OBSERVATION_SIZE, flatten_observation
@@ -93,6 +94,13 @@ def test_observation_is_partial_and_seat_relative():
     hidden_cards = set(debug["hands"][(acting + 1) % 4])
     assert not any(obs["own_hand_mask"][card] for card in hidden_cards)
     assert obs["action_mask"].shape == (67,)
+    assert obs["bid_history_seat"].tolist() == [-1, -1, -1, -1]
+    assert obs["play_history_card"].shape == (52,)
+    assert obs["play_history_card"].tolist() == [-1] * 52
+    assert obs["trick_winner_by_trick"].tolist() == [-1] * 13
+    assert obs["void_suits_by_rel_seat"].shape == (4, 4)
+    assert not obs["void_suits_by_rel_seat"].any()
+    assert obs["cards_remaining_by_rel_seat"].tolist() == [13, 13, 13, 13]
     flat = flatten_observation(obs)
     assert flat.shape == (FLAT_OBSERVATION_SIZE,)
     assert flat.dtype == np.float32
@@ -113,9 +121,14 @@ def test_bids_visible_by_relative_seat_after_made():
     obs_for_p1 = env.observe(1)
     assert obs_for_p1["bid_kind"][3] == BID_NORMAL
     assert obs_for_p1["bid_value"][3] == 1
+    assert obs_for_p1["bid_history_seat"].tolist() == [3, -1, -1, -1]
+    assert obs_for_p1["bid_history_kind"].tolist() == [BID_NORMAL, 0, 0, 0]
+    assert obs_for_p1["bid_history_value"].tolist() == [1, 0, 0, 0]
     env.step(NIL_ACTION)
     obs_for_p2 = env.observe(2)
     assert obs_for_p2["bid_kind"][3] == BID_NIL
+    assert obs_for_p2["bid_history_seat"].tolist() == [2, 3, -1, -1]
+    assert obs_for_p2["bid_history_kind"].tolist() == [BID_NORMAL, BID_NIL, 0, 0]
     env.step(BLIND_NIL_ACTION)
     obs_for_p3 = env.observe(3)
     assert obs_for_p3["bid_kind"][3] == BID_BLIND_NIL
@@ -138,6 +151,53 @@ def test_play_mask_trick_completion_and_played_card_observation():
     assert env.get_debug_state()["current_trick"] == []
     assert env.current_player() == info["trick_winner"]
     assert first_player in range(4)
+
+
+def test_public_play_history_tracks_order_winner_voids_and_counts(spade_sweep_hands):
+    env = SpadesPlusEnv(SpadesPlusConfig(first_dealer=3, debug=True))
+    env.reset(seed=1)
+    env.set_hands(spade_sweep_hands)
+    bid_four_players(env, (52, 52, 52, 52))
+
+    env.step(39)
+    env.step(0)
+    obs_for_p2 = env.observe(2)
+
+    assert obs_for_p2["play_history_card"][39] == 39
+    assert obs_for_p2["play_history_seat"][39] == 2
+    assert obs_for_p2["play_history_trick"][39] == 0
+    assert obs_for_p2["play_history_pos"][39] == 0
+    assert obs_for_p2["play_history_led_suit"][39] == SPADES
+    assert obs_for_p2["play_history_followed_suit"][39] == 1
+
+    assert obs_for_p2["play_history_card"][0] == 0
+    assert obs_for_p2["play_history_seat"][0] == 3
+    assert obs_for_p2["play_history_pos"][0] == 1
+    assert obs_for_p2["play_history_led_suit"][0] == SPADES
+    assert obs_for_p2["play_history_followed_suit"][0] == 0
+    assert obs_for_p2["void_suits_by_rel_seat"][3, SPADES]
+    assert obs_for_p2["cards_remaining_by_rel_seat"].tolist() == [13, 13, 12, 12]
+
+    env.step(13)
+    _, _, _, _, info = env.step(26)
+    assert info["trick_completed"]
+    obs_for_winner = env.observe(env.current_player())
+    assert env.current_player() == 0
+    assert obs_for_winner["trick_winner_by_trick"][0] == 0
+
+
+def test_absolute_public_history_uses_absolute_seats(spade_sweep_hands):
+    env = SpadesPlusEnv(
+        SpadesPlusConfig(first_dealer=3, debug=True, seat_relative_observation=False)
+    )
+    env.reset(seed=1)
+    env.set_hands(spade_sweep_hands)
+    bid_four_players(env, (52, 53, 54, 55))
+    env.step(39)
+
+    obs = env.observe(2)
+    assert obs["bid_history_seat"].tolist() == [0, 1, 2, 3]
+    assert obs["play_history_seat"][39] == 0
 
 
 def test_illegal_actions_raise():

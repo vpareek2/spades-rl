@@ -208,7 +208,9 @@ class SpadesPlusEnv:
         player = self._current_player
         self.player_bids[player] = bid
         self.bid_count += 1
-        self.history.append(Event(type="bid", player=player, action=action, bid=bid))
+        self.history.append(
+            Event(type="bid", player=player, action=action, bid=bid, hand_index=self.hand_number)
+        )
 
         if self.bid_count == 4:
             self.phase = Phase.PLAYING
@@ -232,6 +234,7 @@ class SpadesPlusEnv:
                 player=player,
                 action=action,
                 card_id=action,
+                hand_index=self.hand_number,
                 trick_index=self.trick_number,
             )
         )

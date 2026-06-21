@@ -177,8 +177,8 @@ Run duplicate head-to-head eval against a baseline bot:
 
 ```bash
 uv run spades-eval-duplicate \
-  --policy-a checkpoint:artifacts/spades_curriculum_25m_bidbot/checkpoint.pt \
-  --policy-b bot:conservative \
+  --policy-a bot:lowest \
+  --policy-b bot:highest \
   --hands 1024 \
   --max-normal-bid 13 \
   --nil \
@@ -189,8 +189,10 @@ uv run spades-eval-duplicate \
 Positive `duplicate_margin_mean` means policy A beat policy B after replaying
 each deal with team seats swapped.
 
-The current best checkpoint is preserved in
-`artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`. It scored
+The best pre-public-history checkpoint is preserved as a historical artifact in
+`artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`. It used the legacy flat
+observation format and will not load on branch tips that include public-history
+observation fields. It scored
 `mean=-0.010721435770392418` over 16,384 greedy hands with normal bids capped at
 5, nil disabled, blind nil disabled, and `0` illegal actions. With the full
 action space enabled it scored `mean=-0.025358887389302254` over 4,096 hands and
