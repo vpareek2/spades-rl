@@ -122,3 +122,30 @@ Next after the `w03` eval:
   - `rollout_samples=4`,
   - `state_actor=checkpoint:checkpoints/ppo_play_anchor_smoke.pt`,
   - `rollout_actor=bot:conservative`.
+
+## Play-EV Trainer Implementation
+
+Added supervised play-EV training/eval tooling:
+
+- commands:
+  - `spades-train-play-ev`
+  - `spades-eval-play-ev`
+- trains existing card-action logits from play-EV soft labels,
+- keeps checkpoint format unchanged,
+- supports `--play-heads-only` for the first conservative pass so bidding/encoder behavior is not disturbed,
+- reports policy regret, top-1, mean best EV, and mean chosen EV.
+
+Validation:
+
+```text
+uv run ruff check src tests
+uv run pytest
+84 passed, 1 warning
+```
+
+Next A100 job should:
+
+1. wait for the current `w03` duplicate sweep to finish,
+2. generate a small real play-EV dataset,
+3. train a play-head-only model from `ppo_play_anchor_smoke.pt`,
+4. evaluate it on the play-EV dataset and duplicate eval against `bot:conservative`.
