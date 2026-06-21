@@ -17,6 +17,7 @@ TRANSFORMER_LAYERS="${TRANSFORMER_LAYERS:-6}"
 ATTENTION_HEADS="${ATTENTION_HEADS:-8}"
 FFN_SIZE="${FFN_SIZE:-1024}"
 DROPOUT="${DROPOUT:-0.05}"
+DEVICE="${DEVICE:-cuda}"
 DUPLICATE_HANDS="${DUPLICATE_HANDS:-512}"
 DATASET="${DATASET:-data/${RUN_NAME}.npz}"
 LOGDIR="${LOGDIR:-logs/${RUN_NAME}}"
@@ -32,6 +33,7 @@ echo "=== ${RUN_NAME} start $(date -Is) ==="
 echo "base checkpoint: ${BASE_CHECKPOINT}"
 echo "dataset: ${DATASET}"
 echo "states=${STATES} rollout_samples=${ROLLOUT_SAMPLES} seed=${SEED}"
+echo "device: ${DEVICE}"
 echo "weights: ${WEIGHTS}"
 
 echo "=== ${RUN_NAME} generate $(date -Is) ==="
@@ -43,6 +45,7 @@ echo "=== ${RUN_NAME} generate $(date -Is) ==="
   --state-opponent-actor "$OPPONENT_ACTOR" \
   --rollout-ally-actor "checkpoint:${BASE_CHECKPOINT}" \
   --rollout-opponent-actor "$OPPONENT_ACTOR" \
+  --device "$DEVICE" \
   --output "$DATASET" \
   --progress
 
