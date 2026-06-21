@@ -14,6 +14,7 @@ dependencies = [
     "pufferlib",
     "pytest>=9.1.1",
     "ruff>=0.15.18",
+    "tqdm>=4.68.3",
 ]
 
 [project.scripts]

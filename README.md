@@ -210,7 +210,8 @@ uv run spades-summarize-bid-ev data/bid_ev_v1.npz
 
 The EV dataset stores one bidding observation per row plus candidate-bid
 Q-values estimated by rollout. Q-values are unscaled current-team hand score
-deltas, so they can train a bid-Q/policy head directly.
+deltas, so they can train a bid-Q/policy head directly. Dataset generation and
+EV training show progress bars by default; pass `--no-progress` for quieter logs.
 
 Train the transformer bidding heads from EV labels:
 

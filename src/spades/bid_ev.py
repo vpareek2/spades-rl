@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from spades.actions import (
     ACTION_SPACE_SIZE,
@@ -97,41 +98,44 @@ def collect_bidding_states(
     max_normal_bid: int,
     nil: bool,
     blind_nil: bool,
+    progress: bool = True,
 ) -> list[BiddingState]:
     rng = np.random.default_rng(seed)
     bot = make_bot(state_bot_name)
     states: list[BiddingState] = []
     deal_idx = 0
-    while len(states) < count:
-        env = SpadesPlusEnv(
-            SpadesPlusConfig(
-                nil_enabled=nil,
-                blind_nil_enabled=blind_nil,
-                blind_nil_policy="always" if blind_nil else "disabled",
-            )
-        )
-        env.reset(seed=seed + deal_idx)
-        previous_bid_actions: list[int] = []
-        while env.phase == Phase.BIDDING and len(states) < count:
-            obs = env.observe()
-            legal = _filter_bidding_legal_actions(env.legal_actions(), max_normal_bid)
-            debug = env.get_debug_state()
-            states.append(
-                BiddingState(
-                    observation=flatten_observation(obs).astype(np.float32),
-                    legal_actions=list(legal),
-                    acting_player=env.current_player(),
-                    dealer=int(env.dealer),
-                    hands=[list(hand) for hand in debug["hands"]],
-                    team_scores=env.team_scores.astype(int).tolist(),
-                    team_bags=env.team_bags.astype(int).tolist(),
-                    previous_bid_actions=list(previous_bid_actions),
+    with tqdm(total=count, desc="Collect bidding states", disable=not progress) as bar:
+        while len(states) < count:
+            env = SpadesPlusEnv(
+                SpadesPlusConfig(
+                    nil_enabled=nil,
+                    blind_nil_enabled=blind_nil,
+                    blind_nil_policy="always" if blind_nil else "disabled",
                 )
             )
-            action = int(bot.act(obs, legal, rng))
-            env.step(action)
-            previous_bid_actions.append(action)
-        deal_idx += 1
+            env.reset(seed=seed + deal_idx)
+            previous_bid_actions: list[int] = []
+            while env.phase == Phase.BIDDING and len(states) < count:
+                obs = env.observe()
+                legal = _filter_bidding_legal_actions(env.legal_actions(), max_normal_bid)
+                debug = env.get_debug_state()
+                states.append(
+                    BiddingState(
+                        observation=flatten_observation(obs).astype(np.float32),
+                        legal_actions=list(legal),
+                        acting_player=env.current_player(),
+                        dealer=int(env.dealer),
+                        hands=[list(hand) for hand in debug["hands"]],
+                        team_scores=env.team_scores.astype(int).tolist(),
+                        team_bags=env.team_bags.astype(int).tolist(),
+                        previous_bid_actions=list(previous_bid_actions),
+                    )
+                )
+                bar.update(1)
+                action = int(bot.act(obs, legal, rng))
+                env.step(action)
+                previous_bid_actions.append(action)
+            deal_idx += 1
     return states
 
 
@@ -264,6 +268,7 @@ def generate_bid_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
         max_normal_bid=args.max_normal_bid,
         nil=args.nil,
         blind_nil=args.blind_nil,
+        progress=args.progress,
     )
 
     observations = np.zeros((args.states, FLAT_OBSERVATION_SIZE), dtype=np.float32)
@@ -277,7 +282,7 @@ def generate_bid_ev_dataset(args: argparse.Namespace) -> dict[str, Any]:
     dealer = np.zeros(args.states, dtype=np.int8)
     previous_bid_actions = np.full((args.states, 4), -1, dtype=np.int16)
 
-    for idx, state in enumerate(states):
+    for idx, state in enumerate(tqdm(states, desc="Evaluate bid EV", disable=not args.progress)):
         observations[idx] = state.observation
         acting_player[idx] = state.acting_player
         dealer[idx] = state.dealer
@@ -389,6 +394,8 @@ def make_generate_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-nil", action="store_false", dest="nil")
     parser.add_argument("--blind-nil", action="store_true", default=True)
     parser.add_argument("--no-blind-nil", action="store_false", dest="blind_nil")
+    parser.add_argument("--progress", action="store_true", default=True)
+    parser.add_argument("--no-progress", action="store_false", dest="progress")
     parser.add_argument("--output", required=True)
     return parser
 

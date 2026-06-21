@@ -15,6 +15,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm.auto import tqdm
 
 from spades.actions import ACTION_SPACE_SIZE, BLIND_NIL_ACTION, NIL_ACTION
 from spades.observations import FLAT_OBSERVATION_SIZE
@@ -380,11 +381,18 @@ def train_bid_ev(args: argparse.Namespace) -> dict[str, Any]:
         best_metric = float("inf")
         history: list[dict[str, Any]] = []
         started_at = time.time()
-        for epoch in range(1, args.epochs + 1):
+        epoch_iter = tqdm(range(1, args.epochs + 1), desc="EV training", disable=not args.progress)
+        for epoch in epoch_iter:
             policy.train()
             running_loss = 0.0
             rows_seen = 0
-            for cpu_batch in train_loader:
+            batch_iter = tqdm(
+                train_loader,
+                desc=f"Epoch {epoch}/{args.epochs}",
+                leave=False,
+                disable=not args.progress,
+            )
+            for cpu_batch in batch_iter:
                 batch = tuple(t.to(device) for t in cpu_batch)
                 optimizer.zero_grad(set_to_none=True)
                 autocast_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
@@ -398,6 +406,7 @@ def train_bid_ev(args: argparse.Namespace) -> dict[str, Any]:
                 batch_rows = batch[0].shape[0]
                 rows_seen += batch_rows
                 running_loss += float(loss.item()) * batch_rows
+                batch_iter.set_postfix(loss=running_loss / max(rows_seen, 1))
 
             train_metrics = evaluate_bid_ev(policy, train_data, args, device)
             val_metrics = evaluate_bid_ev(policy, val_data, args, device) if val_data is not None else train_metrics
@@ -420,6 +429,11 @@ def train_bid_ev(args: argparse.Namespace) -> dict[str, Any]:
                     top1=val_metrics.policy_top1,
                 ),
                 flush=True,
+            )
+            epoch_iter.set_postfix(
+                val_regret=val_metrics.policy_regret,
+                val_q_mae=val_metrics.q_mae,
+                val_top1=val_metrics.policy_top1,
             )
             if val_metrics.policy_regret < best_metric:
                 best_metric = val_metrics.policy_regret
@@ -488,6 +502,8 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu", action="store_true", default=False)
     parser.add_argument("--amp", action="store_true", default=False)
     parser.add_argument("--freeze-encoder", action="store_true", default=False)
+    parser.add_argument("--progress", action="store_true", default=True)
+    parser.add_argument("--no-progress", action="store_false", dest="progress")
     parser.add_argument("--wandb", action="store_true", default=False)
     parser.add_argument("--wandb-project", type=str, default="spades-rl")
     parser.add_argument("--wandb-group", type=str, default="bid-ev")

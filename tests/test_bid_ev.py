@@ -101,6 +101,7 @@ def test_generate_bid_ev_dataset_npz_shapes_and_summary(tmp_path):
             max_normal_bid=13,
             nil=False,
             blind_nil=False,
+            progress=False,
             output=str(output),
         )
     )
@@ -140,6 +141,7 @@ def test_bid_ev_cli_smoke(tmp_path, monkeypatch):
             "1",
             "--no-nil",
             "--no-blind-nil",
+            "--no-progress",
             "--output",
             str(output),
         ],
