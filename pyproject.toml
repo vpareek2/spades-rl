@@ -23,6 +23,8 @@ spades-train-puffer = "spades.puffer:main"
 spades-eval-puffer = "spades.puffer:eval_main"
 spades-pretrain-puffer = "spades.puffer:pretrain_main"
 spades-eval-duplicate = "spades.eval:duplicate_main"
+spades-generate-bid-ev = "spades.bid_ev:generate_main"
+spades-summarize-bid-ev = "spades.bid_ev:summarize_main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]

@@ -189,6 +189,26 @@ uv run spades-eval-duplicate \
 Positive `duplicate_margin_mean` means policy A beat policy B after replaying
 each deal with team seats swapped.
 
+Generate rollout-EV bidding labels:
+
+```bash
+uv run spades-generate-bid-ev \
+  --states 1024 \
+  --hidden-samples 8 \
+  --state-bot conservative \
+  --rollout-bot conservative \
+  --max-normal-bid 13 \
+  --nil \
+  --blind-nil \
+  --output data/bid_ev_v1.npz
+
+uv run spades-summarize-bid-ev data/bid_ev_v1.npz
+```
+
+The EV dataset stores one bidding observation per row plus candidate-bid
+Q-values estimated by rollout. Q-values are unscaled current-team hand score
+deltas, so they can train a bid-Q/policy head directly.
+
 The best pre-public-history checkpoint is preserved as a historical artifact in
 `artifacts/spades_curriculum_25m_bidbot/checkpoint.pt`. It used the legacy flat
 observation format and will not load on branch tips that include public-history
