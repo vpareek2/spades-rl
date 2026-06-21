@@ -270,6 +270,78 @@ def _configure_trainable(policy: SpadesTransformerPolicy, freeze_encoder: bool) 
     return params
 
 
+def _wandb_config(args: argparse.Namespace, rows: dict[str, int], device: str, use_amp: bool) -> dict[str, Any]:
+    keys = [
+        "dataset",
+        "load_path",
+        "save_path",
+        "epochs",
+        "batch_size",
+        "learning_rate",
+        "weight_decay",
+        "val_fraction",
+        "seed",
+        "q_scale",
+        "policy_temperature",
+        "q_weight",
+        "policy_weight",
+        "rank_weight",
+        "rank_gap",
+        "rank_margin",
+        "max_grad_norm",
+        "d_model",
+        "transformer_layers",
+        "attention_heads",
+        "ffn_size",
+        "dropout",
+        "freeze_encoder",
+    ]
+    config = {key: getattr(args, key) for key in keys}
+    config.update(rows)
+    config["device"] = device
+    config["amp_enabled"] = use_amp
+    return config
+
+
+def _init_wandb(args: argparse.Namespace, config: dict[str, Any]):
+    if not args.wandb:
+        return None, None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError("W&B logging requested with --wandb, but wandb is not installed") from exc
+    run = wandb.init(
+        project=args.wandb_project,
+        group=args.wandb_group or None,
+        name=args.wandb_run_name or None,
+        mode=args.wandb_mode,
+        config=config,
+    )
+    return wandb, run
+
+
+def _flatten_epoch_metrics(epoch_metrics: dict[str, Any]) -> dict[str, float | int]:
+    flat: dict[str, float | int] = {
+        "epoch": int(epoch_metrics["epoch"]),
+        "optimizer_loss": float(epoch_metrics["optimizer_loss"]),
+    }
+    for split in ("train", "val"):
+        for key, value in epoch_metrics[split].items():
+            if isinstance(value, int):
+                flat[f"{split}/{key}"] = value
+            else:
+                flat[f"{split}/{key}"] = float(value)
+    return flat
+
+
+def _artifact_name(args: argparse.Namespace) -> str:
+    if args.wandb_artifact_name:
+        return args.wandb_artifact_name
+    if args.save_path:
+        return os.path.splitext(os.path.basename(args.save_path))[0]
+    return "bid_ev_transformer"
+
+
 def train_bid_ev(args: argparse.Namespace) -> dict[str, Any]:
     if args.batch_size <= 0:
         raise ValueError("batch_size must be positive")
@@ -287,82 +359,105 @@ def train_bid_ev(args: argparse.Namespace) -> dict[str, Any]:
 
     dataset = load_bid_ev_dataset(args.dataset)
     train_data, val_data = split_dataset(dataset, val_fraction=args.val_fraction, seed=args.seed)
-    policy = build_bid_ev_policy(args, device)
-    if args.load_path:
-        load_transformer_state(policy, args.load_path, device)
-    optimizer = torch.optim.AdamW(
-        _configure_trainable(policy, args.freeze_encoder),
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay,
-    )
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    train_loader = make_loader(train_data, batch_size=args.batch_size, shuffle=True)
-
-    best_metric = float("inf")
-    history: list[dict[str, Any]] = []
-    started_at = time.time()
-    for epoch in range(1, args.epochs + 1):
-        policy.train()
-        running_loss = 0.0
-        rows_seen = 0
-        for cpu_batch in train_loader:
-            batch = tuple(t.to(device) for t in cpu_batch)
-            optimizer.zero_grad(set_to_none=True)
-            autocast_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
-            with autocast_context:
-                loss, _parts = _losses(policy, batch, args)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
-            scaler.step(optimizer)
-            scaler.update()
-            batch_rows = batch[0].shape[0]
-            rows_seen += batch_rows
-            running_loss += float(loss.item()) * batch_rows
-
-        train_metrics = evaluate_bid_ev(policy, train_data, args, device)
-        val_metrics = evaluate_bid_ev(policy, val_data, args, device) if val_data is not None else train_metrics
-        epoch_metrics = {
-            "epoch": epoch,
-            "optimizer_loss": running_loss / max(rows_seen, 1),
-            "train": asdict(train_metrics),
-            "val": asdict(val_metrics),
-        }
-        history.append(epoch_metrics)
-        print(
-            "epoch={epoch} train_loss={train_loss:.4f} val_regret={regret:.2f} "
-            "val_q_mae={q_mae:.2f} val_top1={top1:.3f}".format(
-                epoch=epoch,
-                train_loss=train_metrics.loss,
-                regret=val_metrics.policy_regret,
-                q_mae=val_metrics.q_mae,
-                top1=val_metrics.policy_top1,
-            ),
-            flush=True,
-        )
-        if val_metrics.policy_regret < best_metric:
-            best_metric = val_metrics.policy_regret
-            if args.save_path:
-                os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
-                torch.save(policy.state_dict(), args.save_path)
-
-    metrics = {
-        "dataset": args.dataset,
+    row_counts = {
         "rows": len(dataset.observations),
         "train_rows": len(train_data.observations),
         "val_rows": len(val_data.observations) if val_data is not None else 0,
-        "best_val_policy_regret": best_metric,
-        "model_path": args.save_path,
-        "loaded_model_path": args.load_path,
-        "completed_at": time.time(),
-        "duration_seconds": time.time() - started_at,
-        "history": history,
     }
-    if args.metrics_path:
-        os.makedirs(os.path.dirname(args.metrics_path) or ".", exist_ok=True)
-        with open(args.metrics_path, "w") as f:
-            json.dump(metrics, f, indent=2, sort_keys=True)
-    return metrics
+    wandb_module, wandb_run = _init_wandb(args, _wandb_config(args, row_counts, device, use_amp))
+    policy = build_bid_ev_policy(args, device)
+    try:
+        if args.load_path:
+            load_transformer_state(policy, args.load_path, device)
+        optimizer = torch.optim.AdamW(
+            _configure_trainable(policy, args.freeze_encoder),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        train_loader = make_loader(train_data, batch_size=args.batch_size, shuffle=True)
+
+        best_metric = float("inf")
+        history: list[dict[str, Any]] = []
+        started_at = time.time()
+        for epoch in range(1, args.epochs + 1):
+            policy.train()
+            running_loss = 0.0
+            rows_seen = 0
+            for cpu_batch in train_loader:
+                batch = tuple(t.to(device) for t in cpu_batch)
+                optimizer.zero_grad(set_to_none=True)
+                autocast_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
+                with autocast_context:
+                    loss, _parts = _losses(policy, batch, args)
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
+                scaler.step(optimizer)
+                scaler.update()
+                batch_rows = batch[0].shape[0]
+                rows_seen += batch_rows
+                running_loss += float(loss.item()) * batch_rows
+
+            train_metrics = evaluate_bid_ev(policy, train_data, args, device)
+            val_metrics = evaluate_bid_ev(policy, val_data, args, device) if val_data is not None else train_metrics
+            epoch_metrics = {
+                "epoch": epoch,
+                "optimizer_loss": running_loss / max(rows_seen, 1),
+                "train": asdict(train_metrics),
+                "val": asdict(val_metrics),
+            }
+            history.append(epoch_metrics)
+            if wandb_run is not None:
+                wandb_run.log(_flatten_epoch_metrics(epoch_metrics), step=epoch)
+            print(
+                "epoch={epoch} train_loss={train_loss:.4f} val_regret={regret:.2f} "
+                "val_q_mae={q_mae:.2f} val_top1={top1:.3f}".format(
+                    epoch=epoch,
+                    train_loss=train_metrics.loss,
+                    regret=val_metrics.policy_regret,
+                    q_mae=val_metrics.q_mae,
+                    top1=val_metrics.policy_top1,
+                ),
+                flush=True,
+            )
+            if val_metrics.policy_regret < best_metric:
+                best_metric = val_metrics.policy_regret
+                if args.save_path:
+                    os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok=True)
+                    torch.save(policy.state_dict(), args.save_path)
+
+        metrics = {
+            "dataset": args.dataset,
+            **row_counts,
+            "best_val_policy_regret": best_metric,
+            "model_path": args.save_path,
+            "loaded_model_path": args.load_path,
+            "completed_at": time.time(),
+            "duration_seconds": time.time() - started_at,
+            "history": history,
+        }
+        if args.metrics_path:
+            os.makedirs(os.path.dirname(args.metrics_path) or ".", exist_ok=True)
+            with open(args.metrics_path, "w") as f:
+                json.dump(metrics, f, indent=2, sort_keys=True)
+        if wandb_run is not None:
+            wandb_run.summary["best_val_policy_regret"] = best_metric
+            wandb_run.summary["duration_seconds"] = metrics["duration_seconds"]
+            if args.save_path and os.path.exists(args.save_path):
+                artifact = wandb_module.Artifact(
+                    _artifact_name(args),
+                    type="model",
+                    metadata={"best_val_policy_regret": best_metric, **row_counts},
+                )
+                artifact.add_file(args.save_path)
+                if args.metrics_path and os.path.exists(args.metrics_path):
+                    artifact.add_file(args.metrics_path)
+                wandb_run.log_artifact(artifact)
+        return metrics
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 def make_parser() -> argparse.ArgumentParser:
@@ -393,6 +488,12 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu", action="store_true", default=False)
     parser.add_argument("--amp", action="store_true", default=False)
     parser.add_argument("--freeze-encoder", action="store_true", default=False)
+    parser.add_argument("--wandb", action="store_true", default=False)
+    parser.add_argument("--wandb-project", type=str, default="spades-rl")
+    parser.add_argument("--wandb-group", type=str, default="bid-ev")
+    parser.add_argument("--wandb-run-name", type=str, default="")
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
+    parser.add_argument("--wandb-artifact-name", type=str, default="")
     return parser
 
 

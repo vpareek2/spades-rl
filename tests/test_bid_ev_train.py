@@ -98,6 +98,12 @@ def test_train_bid_ev_writes_checkpoint_and_metrics(tmp_path):
             cpu=True,
             amp=False,
             freeze_encoder=False,
+            wandb=False,
+            wandb_project="spades-rl",
+            wandb_group="bid-ev",
+            wandb_run_name="",
+            wandb_mode="disabled",
+            wandb_artifact_name="",
         )
     )
 
@@ -134,6 +140,9 @@ def test_bid_ev_train_cli_smoke(tmp_path, monkeypatch):
             "--dropout",
             "0.0",
             "--cpu",
+            "--wandb",
+            "--wandb-mode",
+            "disabled",
             "--save-path",
             str(save_path),
         ],

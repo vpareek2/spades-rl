@@ -218,7 +218,10 @@ Train the transformer bidding heads from EV labels:
 uv run spades-train-bid-ev \
   --dataset data/bid_ev_v1.npz \
   --save-path checkpoints/bid_ev_transformer_v1.pt \
-  --metrics-path logs/bid_ev_transformer_v1.json
+  --metrics-path logs/bid_ev_transformer_v1.json \
+  --wandb \
+  --wandb-project spades-rl \
+  --wandb-run-name bid_ev_transformer_v1
 ```
 
 The best pre-public-history/pre-transformer checkpoint is preserved as a
