@@ -73,6 +73,9 @@ def _train_args(dataset_path, save_path, metrics_path):
         rank_weight=0.1,
         rank_gap=5.0,
         rank_margin=0.05,
+        behavior_anchor_path="",
+        behavior_anchor_weight=0.0,
+        behavior_anchor_temperature=1.0,
         max_grad_norm=1.0,
         d_model=32,
         transformer_layers=1,
@@ -120,6 +123,34 @@ def test_train_play_ev_writes_checkpoint_and_metrics(tmp_path):
     assert metrics["train_rows"] == 3
     assert metrics["val_rows"] == 3
     assert "policy_regret" in metrics["history"][0]["val"]
+    assert "behavior_anchor_loss" in metrics["history"][0]["val"]
+
+
+def test_train_play_ev_supports_behavior_anchor(tmp_path):
+    dataset_path = tmp_path / "tiny_play_ev_anchor.npz"
+    anchor_path = tmp_path / "anchor.pt"
+    save_path = tmp_path / "play_ev_anchor.pt"
+    metrics_path = tmp_path / "metrics_anchor.json"
+    write_tiny_play_ev_npz(dataset_path)
+    policy = SpadesTransformerPolicy(
+        FLAT_OBSERVATION_SIZE,
+        ACTION_SPACE_SIZE,
+        d_model=32,
+        num_layers=1,
+        num_heads=4,
+        ffn_size=64,
+        dropout=0.0,
+    )
+    torch.save(policy.state_dict(), anchor_path)
+
+    args = _train_args(dataset_path, save_path, metrics_path)
+    args.load_path = str(anchor_path)
+    args.behavior_anchor_weight = 0.5
+    metrics = train_play_ev(args)
+
+    assert save_path.exists()
+    assert metrics["behavior_anchor_path"] == str(anchor_path)
+    assert "behavior_anchor_loss" in metrics["history"][0]["train"]
 
 
 def test_play_ev_train_cli_smoke(tmp_path, monkeypatch):
@@ -189,6 +220,9 @@ def test_eval_play_ev_checkpoint_writes_metrics(tmp_path):
             rank_weight=0.1,
             rank_gap=5.0,
             rank_margin=0.05,
+            behavior_anchor_path="",
+            behavior_anchor_weight=0.0,
+            behavior_anchor_temperature=1.0,
             d_model=32,
             transformer_layers=1,
             attention_heads=4,

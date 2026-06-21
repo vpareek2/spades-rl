@@ -48,6 +48,7 @@ class PlayEVLossMetrics:
     loss: float
     policy_loss: float
     rank_loss: float
+    behavior_anchor_loss: float
     policy_top1: float
     policy_regret: float
     mean_best_ev: float
@@ -134,13 +135,15 @@ def _masked_play_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tenso
 
 def _losses(
     policy: SpadesTransformerPolicy,
+    behavior_teacher: SpadesTransformerPolicy | None,
     batch: tuple[torch.Tensor, ...],
     args: argparse.Namespace,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    observations, target_q, evaluated_mask, _legal_mask, _best_action = batch
+    observations, target_q, evaluated_mask, legal_mask, _best_action = batch
     heads = policy.forward_heads(observations, apply_mask=False)
     play_logits = heads["logits"][:, :PLAY_ACTION_COUNT]
     evaluated_mask = evaluated_mask.bool()
+    legal_mask = legal_mask.bool()
 
     target_logits = _masked_play_logits(target_q / args.policy_temperature, evaluated_mask)
     target_probs = torch.softmax(target_logits, dim=1)
@@ -156,16 +159,39 @@ def _losses(
     rank_losses = F.relu(args.rank_margin - pair_margin)[worse_mask]
     rank_loss = rank_losses.mean() if rank_losses.numel() else play_logits.sum() * 0.0
 
-    total = args.policy_weight * policy_loss + args.rank_weight * rank_loss
+    if behavior_teacher is None or args.behavior_anchor_weight == 0:
+        behavior_anchor_loss = play_logits.sum() * 0.0
+    else:
+        if args.behavior_anchor_temperature <= 0:
+            raise ValueError("behavior_anchor_temperature must be positive")
+        with torch.no_grad():
+            teacher_heads = behavior_teacher.forward_heads(observations, apply_mask=False)
+            teacher_logits = teacher_heads["logits"][:, :PLAY_ACTION_COUNT]
+            teacher_logits = _masked_play_logits(
+                teacher_logits / args.behavior_anchor_temperature,
+                legal_mask,
+            )
+            teacher_probs = torch.softmax(teacher_logits, dim=1)
+        student_logits = _masked_play_logits(play_logits / args.behavior_anchor_temperature, legal_mask)
+        student_log_probs = torch.log_softmax(student_logits, dim=1)
+        behavior_anchor_loss = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+    total = (
+        args.policy_weight * policy_loss
+        + args.rank_weight * rank_loss
+        + args.behavior_anchor_weight * behavior_anchor_loss
+    )
     return total, {
         "policy_loss": policy_loss.detach(),
         "rank_loss": rank_loss.detach(),
+        "behavior_anchor_loss": behavior_anchor_loss.detach(),
     }
 
 
 @torch.no_grad()
 def evaluate_play_ev(
     policy: SpadesTransformerPolicy,
+    behavior_teacher: SpadesTransformerPolicy | None,
     dataset: PlayEVDataset,
     args: argparse.Namespace,
     device: str | torch.device,
@@ -176,6 +202,7 @@ def evaluate_play_ev(
         "loss": 0.0,
         "policy_loss": 0.0,
         "rank_loss": 0.0,
+        "behavior_anchor_loss": 0.0,
         "policy_top1": 0.0,
         "policy_regret": 0.0,
         "best_ev": 0.0,
@@ -185,7 +212,7 @@ def evaluate_play_ev(
     for cpu_batch in loader:
         batch = tuple(t.to(device) for t in cpu_batch)
         observations, target_q, evaluated_mask, _legal_mask, _best_action = batch
-        loss, parts = _losses(policy, batch, args)
+        loss, parts = _losses(policy, behavior_teacher, batch, args)
         heads = policy.forward_heads(observations, apply_mask=False)
         play_logits = heads["logits"][:, :PLAY_ACTION_COUNT]
         evaluated_mask = evaluated_mask.bool()
@@ -202,6 +229,7 @@ def evaluate_play_ev(
         totals["loss"] += float(loss.item()) * batch_rows
         totals["policy_loss"] += float(parts["policy_loss"].item()) * batch_rows
         totals["rank_loss"] += float(parts["rank_loss"].item()) * batch_rows
+        totals["behavior_anchor_loss"] += float(parts["behavior_anchor_loss"].item()) * batch_rows
         totals["policy_top1"] += float((policy_idx == best_idx).sum().item())
         totals["policy_regret"] += float((best_q - policy_q).sum().item())
         totals["best_ev"] += float(best_q.sum().item())
@@ -213,6 +241,7 @@ def evaluate_play_ev(
         loss=totals["loss"] / rows,
         policy_loss=totals["policy_loss"] / rows,
         rank_loss=totals["rank_loss"] / rows,
+        behavior_anchor_loss=totals["behavior_anchor_loss"] / rows,
         policy_top1=totals["policy_top1"] / rows,
         policy_regret=totals["policy_regret"] / rows,
         mean_best_ev=totals["best_ev"] / rows,
@@ -283,6 +312,9 @@ def _wandb_config(args: argparse.Namespace, rows: dict[str, int], device: str, u
         "rank_weight",
         "rank_gap",
         "rank_margin",
+        "behavior_anchor_path",
+        "behavior_anchor_weight",
+        "behavior_anchor_temperature",
         "max_grad_norm",
         "d_model",
         "transformer_layers",
@@ -346,6 +378,10 @@ def train_play_ev(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("epochs must be positive")
     if args.policy_temperature <= 0:
         raise ValueError("policy_temperature must be positive")
+    if args.behavior_anchor_weight < 0:
+        raise ValueError("behavior_anchor_weight must be non-negative")
+    if args.behavior_anchor_temperature <= 0:
+        raise ValueError("behavior_anchor_temperature must be positive")
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -364,6 +400,18 @@ def train_play_ev(args: argparse.Namespace) -> dict[str, Any]:
     try:
         if args.load_path:
             load_transformer_state(policy, args.load_path, device)
+        behavior_anchor_path = args.behavior_anchor_path
+        if not behavior_anchor_path and args.behavior_anchor_weight > 0:
+            behavior_anchor_path = args.load_path
+        behavior_teacher: SpadesTransformerPolicy | None = None
+        if behavior_anchor_path:
+            behavior_teacher = build_play_ev_policy(args, device)
+            load_transformer_state(behavior_teacher, behavior_anchor_path, device)
+            behavior_teacher.eval()
+            for param in behavior_teacher.parameters():
+                param.requires_grad = False
+        elif args.behavior_anchor_weight > 0:
+            raise ValueError("behavior anchor weight requires --behavior-anchor-path or --load-path")
         optimizer = torch.optim.AdamW(
             _configure_trainable(policy, args),
             lr=args.learning_rate,
@@ -392,7 +440,7 @@ def train_play_ev(args: argparse.Namespace) -> dict[str, Any]:
                 optimizer.zero_grad(set_to_none=True)
                 autocast_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
                 with autocast_context:
-                    loss, _parts = _losses(policy, batch, args)
+                    loss, _parts = _losses(policy, behavior_teacher, batch, args)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), args.max_grad_norm)
@@ -403,8 +451,12 @@ def train_play_ev(args: argparse.Namespace) -> dict[str, Any]:
                 running_loss += float(loss.item()) * batch_rows
                 batch_iter.set_postfix(loss=running_loss / max(rows_seen, 1))
 
-            train_metrics = evaluate_play_ev(policy, train_data, args, device)
-            val_metrics = evaluate_play_ev(policy, val_data, args, device) if val_data is not None else train_metrics
+            train_metrics = evaluate_play_ev(policy, behavior_teacher, train_data, args, device)
+            val_metrics = (
+                evaluate_play_ev(policy, behavior_teacher, val_data, args, device)
+                if val_data is not None
+                else train_metrics
+            )
             epoch_metrics = {
                 "epoch": epoch,
                 "optimizer_loss": running_loss / max(rows_seen, 1),
@@ -443,6 +495,7 @@ def train_play_ev(args: argparse.Namespace) -> dict[str, Any]:
             "best_val_policy_regret": best_metric,
             "model_path": args.save_path,
             "loaded_model_path": args.load_path,
+            "behavior_anchor_path": behavior_anchor_path,
             "completed_at": time.time(),
             "duration_seconds": time.time() - started_at,
             "history": history,
@@ -475,12 +528,21 @@ def eval_play_ev_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("batch_size must be positive")
     if args.policy_temperature <= 0:
         raise ValueError("policy_temperature must be positive")
+    if args.behavior_anchor_weight < 0:
+        raise ValueError("behavior_anchor_weight must be non-negative")
+    if args.behavior_anchor_temperature <= 0:
+        raise ValueError("behavior_anchor_temperature must be positive")
 
     dataset = load_play_ev_dataset(args.dataset)
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     policy = build_play_ev_policy(args, device)
     load_transformer_state(policy, args.checkpoint, device)
-    metrics = asdict(evaluate_play_ev(policy, dataset, args, device))
+    behavior_teacher: SpadesTransformerPolicy | None = None
+    if args.behavior_anchor_path:
+        behavior_teacher = build_play_ev_policy(args, device)
+        load_transformer_state(behavior_teacher, args.behavior_anchor_path, device)
+        behavior_teacher.eval()
+    metrics = asdict(evaluate_play_ev(policy, behavior_teacher, dataset, args, device))
     metrics.update(
         {
             "checkpoint": args.checkpoint,
@@ -513,6 +575,9 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rank-weight", type=float, default=0.1)
     parser.add_argument("--rank-gap", type=float, default=5.0)
     parser.add_argument("--rank-margin", type=float, default=0.05)
+    parser.add_argument("--behavior-anchor-path", type=str, default="")
+    parser.add_argument("--behavior-anchor-weight", type=float, default=0.0)
+    parser.add_argument("--behavior-anchor-temperature", type=float, default=1.0)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--d-model", type=int, default=256)
     parser.add_argument("--transformer-layers", type=int, default=6)
@@ -545,6 +610,9 @@ def make_eval_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rank-weight", type=float, default=0.1)
     parser.add_argument("--rank-gap", type=float, default=5.0)
     parser.add_argument("--rank-margin", type=float, default=0.05)
+    parser.add_argument("--behavior-anchor-path", type=str, default="")
+    parser.add_argument("--behavior-anchor-weight", type=float, default=0.0)
+    parser.add_argument("--behavior-anchor-temperature", type=float, default=1.0)
     parser.add_argument("--d-model", type=int, default=256)
     parser.add_argument("--transformer-layers", type=int, default=6)
     parser.add_argument("--attention-heads", type=int, default=8)
