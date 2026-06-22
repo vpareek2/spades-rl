@@ -42,6 +42,7 @@ SEED="${SEED:-6201}"
 DUPLICATE_HANDS="${DUPLICATE_HANDS:-512}"
 CONFIRM_HANDS="${CONFIRM_HANDS:-2048}"
 CONFIRM_THRESHOLD_RAW="${CONFIRM_THRESHOLD_RAW:-10.8}"
+CONFIRM_MIN_BASE_DELTA_RAW="${CONFIRM_MIN_BASE_DELTA_RAW:-0.0}"
 AUTO_CONFIRM="${AUTO_CONFIRM:-1}"
 EVAL_BASE="${EVAL_BASE:-1}"
 EVAL_SEED="${EVAL_SEED:-123}"
@@ -214,21 +215,33 @@ PY
 
 if [[ "$AUTO_CONFIRM" == "1" ]]; then
   set +e
-  candidate_json="$(python3 - "$LOGDIR/summary.json" "$CONFIRM_THRESHOLD_RAW" <<'PY'
+  candidate_json="$(python3 - "$LOGDIR/summary.json" "$CONFIRM_THRESHOLD_RAW" "$CONFIRM_MIN_BASE_DELTA_RAW" <<'PY'
 import json
 import sys
 
 summary = json.load(open(sys.argv[1]))
 threshold = float(sys.argv[2])
+base_delta = float(sys.argv[3])
 rows = summary.get("rows", [])
+base_raw = None
+for row in rows:
+    if row.get("kind") == "base":
+        base_raw = row.get("duplicate_raw")
+        break
+required = threshold
+if base_raw is not None:
+    required = max(required, float(base_raw) + base_delta)
 for row in rows:
     if row.get("kind") != "checkpoint":
         continue
     raw = row.get("duplicate_raw")
     if raw is None:
         continue
-    print(json.dumps(row, sort_keys=True))
-    raise SystemExit(0 if float(raw) >= threshold else 3)
+    candidate = dict(row)
+    candidate["confirm_required_raw"] = required
+    candidate["confirm_base_raw"] = base_raw
+    print(json.dumps(candidate, sort_keys=True))
+    raise SystemExit(0 if float(raw) >= required else 3)
 print("{}")
 raise SystemExit(2)
 PY
@@ -251,7 +264,7 @@ PY
 )"
     eval_duplicate "checkpoint:${confirm_model}" "$LOGDIR/duplicate_${confirm_tag}_${CONFIRM_HANDS}.json" "$CONFIRM_HANDS"
   elif [[ "$candidate_status" == "3" ]]; then
-    echo "best checkpoint below confirm threshold ${CONFIRM_THRESHOLD_RAW}; skipping ${CONFIRM_HANDS}-hand confirmation"
+    echo "best checkpoint below confirmation gate; skipping ${CONFIRM_HANDS}-hand confirmation"
   else
     echo "no checkpoint candidate available for confirmation"
   fi

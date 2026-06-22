@@ -636,3 +636,46 @@ Launch status:
 - W&B run: `https://wandb.ai/veerpareek12/spades-rl/runs/hh5pow8b`
 - initial health: GPU utilization about `72%`, memory about `72 GiB / 80 GiB`,
 - early PPO logs showed no illegal actions and low play-anchor KL around `0.0027`.
+
+Results:
+
+```text
+checkpoint  duplicate512_raw
+base V2     +11.42
+065536      +10.75
+131072      +11.00
+196608      +10.94
+262144      +10.70
+327680      +10.28
+393216      +11.66
+458752      +10.87
+524288      +11.33
+final       +11.33
+```
+
+The `393216` checkpoint was the only one that beat the same-seed V2 base on the 512-hand screen, so the runner auto-confirmed it at 2048 hands.
+
+2048-hand confirmation:
+
+```text
+checkpoint: checkpoints/ppo_protected_v2_playkl_w1_lr3e5_524k_000393216.pt
+raw mean: +10.79
+CI: [+9.88, +11.70]
+contract failures: A=761, B=1160
+illegal actions: 0
+```
+
+Decision:
+
+- do not promote the protected PPO checkpoint,
+- keep `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as current best,
+- protected PPO can produce short-screen candidates, but this `play_anchor_weight=1.0` run did not beat V2 at 2048 hands.
+
+Next ablation:
+
+- run the same protected PPO recipe with lower play-anchor weight (`0.3`),
+- keep bid PPO disabled and bid heads frozen,
+- keep bid anchors active,
+- use the same checkpoint interval and duplicate screen,
+- require a 512-hand checkpoint screen above the same-run V2 base before spending 2048-hand confirmation,
+- require a 2048 duplicate result above V2 before promotion.
