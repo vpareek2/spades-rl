@@ -18,6 +18,7 @@ ATTENTION_HEADS="${ATTENTION_HEADS:-8}"
 FFN_SIZE="${FFN_SIZE:-1024}"
 DROPOUT="${DROPOUT:-0.05}"
 DEVICE="${DEVICE:-cuda}"
+SKIP_GENERATE="${SKIP_GENERATE:-0}"
 DUPLICATE_HANDS="${DUPLICATE_HANDS:-512}"
 DATASET="${DATASET:-data/${RUN_NAME}.npz}"
 LOGDIR="${LOGDIR:-logs/${RUN_NAME}}"
@@ -36,18 +37,22 @@ echo "states=${STATES} rollout_samples=${ROLLOUT_SAMPLES} seed=${SEED}"
 echo "device: ${DEVICE}"
 echo "weights: ${WEIGHTS}"
 
-echo "=== ${RUN_NAME} generate $(date -Is) ==="
-"$UV_BIN" run spades-generate-play-ev \
-  --states "$STATES" \
-  --rollout-samples "$ROLLOUT_SAMPLES" \
-  --seed "$SEED" \
-  --state-ally-actor "checkpoint:${BASE_CHECKPOINT}" \
-  --state-opponent-actor "$OPPONENT_ACTOR" \
-  --rollout-ally-actor "checkpoint:${BASE_CHECKPOINT}" \
-  --rollout-opponent-actor "$OPPONENT_ACTOR" \
-  --device "$DEVICE" \
-  --output "$DATASET" \
-  --progress
+if [[ "$SKIP_GENERATE" == "1" && -f "$DATASET" ]]; then
+  echo "=== ${RUN_NAME} skip generate $(date -Is) ==="
+else
+  echo "=== ${RUN_NAME} generate $(date -Is) ==="
+  "$UV_BIN" run spades-generate-play-ev \
+    --states "$STATES" \
+    --rollout-samples "$ROLLOUT_SAMPLES" \
+    --seed "$SEED" \
+    --state-ally-actor "checkpoint:${BASE_CHECKPOINT}" \
+    --state-opponent-actor "$OPPONENT_ACTOR" \
+    --rollout-ally-actor "checkpoint:${BASE_CHECKPOINT}" \
+    --rollout-opponent-actor "$OPPONENT_ACTOR" \
+    --device "$DEVICE" \
+    --output "$DATASET" \
+    --progress
+fi
 
 echo "=== ${RUN_NAME} summarize $(date -Is) ==="
 "$UV_BIN" run spades-summarize-play-ev "$DATASET" | tee "$LOGDIR/dataset_summary.json"
@@ -82,7 +87,6 @@ for weight in $WEIGHTS; do
     --load-path "$BASE_CHECKPOINT" \
     --save-path "$checkpoint" \
     --metrics-path "$LOGDIR/train_anchor_w${tag}.json" \
-    --device cuda \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH_SIZE" \
     --learning-rate "$LEARNING_RATE" \
