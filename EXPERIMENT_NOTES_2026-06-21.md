@@ -679,3 +679,45 @@ Next ablation:
 - use the same checkpoint interval and duplicate screen,
 - require a 512-hand checkpoint screen above the same-run V2 base before spending 2048-hand confirmation,
 - require a 2048 duplicate result above V2 before promotion.
+
+## Protected PPO From V2, Play Anchor 0.3
+
+Launched the lower play-anchor ablation to test whether the `1.0` play KL anchor was too restrictive.
+
+Run configuration:
+
+- run name: `ppo_protected_v2_playkl_w03_lr3e5_524k`
+- base: `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`
+- total timesteps: `524288`
+- checkpoint interval: `65536`
+- LR: `3e-5`
+- bid PPO weight: `0.0`
+- play PPO weight: `1.0`
+- bid anchor weight: `1.0`
+- bid-Q anchor weight: `0.1`
+- play anchor weight: `0.3`
+- duplicate screen: `512` hands
+- auto-confirm: only if best checkpoint beats both `+10.8` raw and the same-run V2 base screen.
+
+Launch status:
+
+- launched on A100 at `2026-06-22T04:15:25+00:00`,
+- W&B run: `https://wandb.ai/veerpareek12/spades-rl/runs/1u5qya5k`,
+- initial health: GPU memory about `72 GiB / 80 GiB`, no illegal actions in early epochs.
+
+Final status before teardown:
+
+- training completed successfully through `524288` steps and wrote all interval checkpoints plus the final checkpoint,
+- no illegal actions in training,
+- the wrapper had just started the base 512-hand duplicate eval when the user asked to stop launching evals,
+- stopped the wrapper before any completed w0.3 duplicate-eval JSON was written,
+- no w0.3 checkpoint was evaluated, so no promotion decision can be made from this ablation yet.
+
+Artifacts copied back locally under `cloud_artifacts_2026_06_21/`:
+
+- `logs/`
+- `checkpoints/`
+- `data/`
+- `wandb/`
+
+The synced local artifact directory is about `1.4G`. Remote GPU was idle and no Spades/Puffer processes were running before cleanup.
