@@ -568,7 +568,23 @@ weight  label_regret  label_top1  duplicate512_raw
 10.0    3.4606        0.4417      +10.49
 ```
 
-The auto-confirm watcher selected weight `30.0` for 2048-hand duplicate confirmation. Mid-run check at `1607/2048` hands had regressed to about `+10.10` raw, below the current promoted V2 checkpoint's `+11.17` raw. Await final JSON before making the formal no-promotion decision.
+The auto-confirm watcher selected weight `30.0` for 2048-hand duplicate confirmation.
+
+2048-hand confirmation:
+
+```text
+checkpoint: checkpoints/play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda_anchor_w30p0.pt
+raw mean: +10.45
+CI: [+9.58, +11.32]
+contract failures: A=760, B=1122
+illegal actions: 0
+```
+
+Decision:
+
+- do not promote V5,
+- keep `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt` as the current best checkpoint,
+- V5's larger team-aware label set did not beat V2 despite a promising 512-hand screen.
 
 ## Protected PPO From V2
 
@@ -612,3 +628,11 @@ Interpretation target:
 
 - A checkpoint must beat V2 in duplicate eval, not just improve online PPO reward.
 - If protected PPO cannot beat V2, the next implementation direction is better search/label quality rather than more PPO scale.
+
+Launch status:
+
+- run name: `ppo_protected_v2_playkl_w1_lr3e5_524k`
+- launched on A100 at `2026-06-22T03:33:39+00:00`
+- W&B run: `https://wandb.ai/veerpareek12/spades-rl/runs/hh5pow8b`
+- initial health: GPU utilization about `72%`, memory about `72 GiB / 80 GiB`,
+- early PPO logs showed no illegal actions and low play-anchor KL around `0.0027`.
