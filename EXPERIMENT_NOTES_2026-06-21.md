@@ -505,6 +505,9 @@ Important correction:
 - Stopped that partial run after a few hundred EV states.
 - Fixed `scripts/run_play_ev_team_aware_pipeline.sh` to default `DEVICE=cuda` and pass `--device "$DEVICE"` during dataset generation.
 - Restarted as `play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda`.
+- After generation completed, training initially failed because the runner still passed an invalid `--device cuda` argument to `spades-train-play-ev`.
+- Fixed the runner to remove that train arg and added `SKIP_GENERATE=1` resume support.
+- Resumed the same CUDA run from the completed dataset instead of regenerating rollouts.
 
 - runner: `scripts/run_play_ev_team_aware_pipeline.sh`
 - run name: `play_ev_v5_team_aware_10k_s4_v2_strong_anchor_cuda`
