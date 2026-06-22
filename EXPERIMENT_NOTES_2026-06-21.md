@@ -721,3 +721,11 @@ Artifacts copied back locally under `cloud_artifacts_2026_06_21/`:
 - `wandb/`
 
 The synced local artifact directory is about `1.4G`. Remote GPU was idle and no Spades/Puffer processes were running before cleanup.
+
+Remote cleanup:
+
+- removed `~/spades-rl`,
+- removed uv/Python caches under `~/.cache` and `~/.local/share/uv`,
+- verified GPU idle and no project processes running,
+- remote home directory reduced to about `60M`,
+- A100 instance is ready to tear down.
