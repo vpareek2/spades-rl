@@ -558,3 +558,57 @@ Decision gate:
 
 - if a V5 checkpoint has at least `+10.5` raw at 512 hands, the watcher will run a 2048 confirmation automatically,
 - otherwise keep V2 as current best and stop scaling this exact team-aware label recipe.
+
+Screening results:
+
+```text
+weight  label_regret  label_top1  duplicate512_raw
+30.0    3.3594        0.4441      +11.22
+100.0   3.3949        0.4454      +10.58
+10.0    3.4606        0.4417      +10.49
+```
+
+The auto-confirm watcher selected weight `30.0` for 2048-hand duplicate confirmation. Mid-run check at `1607/2048` hands had regressed to about `+10.10` raw, below the current promoted V2 checkpoint's `+11.17` raw. Await final JSON before making the formal no-promotion decision.
+
+## Protected PPO From V2
+
+Implemented `scripts/run_protected_ppo_ladder.sh` to test whether PPO can improve the promoted V2 play policy without repeating the prior PPO drift.
+
+Experiment design:
+
+- initialize from `checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt`,
+- disable bid PPO with `--bid-ppo-weight 0.0`,
+- freeze bid heads,
+- anchor bidding to V2 with bid policy KL and bid-Q loss,
+- train play decisions with PPO,
+- anchor play logits to V2 with play KL,
+- checkpoint every fixed step interval,
+- evaluate base and all checkpoints on the same duplicate deals,
+- write `summary.json`,
+- auto-confirm the best checkpoint at 2048 hands if it clears the screen threshold.
+
+Default command shape:
+
+```bash
+UV_BIN=/home/ubuntu/.local/bin/uv \
+BASE_CHECKPOINT=checkpoints/play_ev_v2_10k_s4_headonly_from_best.pt \
+RUN_NAME=ppo_protected_v2_playkl_w1_lr3e5_524k \
+TOTAL_TIMESTEPS=524288 \
+CHECKPOINT_INTERVAL_STEPS=65536 \
+LEARNING_RATE=0.00003 \
+PLAY_ANCHOR_WEIGHT=1.0 \
+BID_ANCHOR_WEIGHT=1.0 \
+BID_Q_ANCHOR_WEIGHT=0.1 \
+BID_PPO_WEIGHT=0.0 \
+PLAY_PPO_WEIGHT=1.0 \
+DUPLICATE_HANDS=512 \
+CONFIRM_THRESHOLD_RAW=10.8 \
+WANDB=1 \
+WANDB_GROUP=ppo-protected-v2 \
+scripts/run_protected_ppo_ladder.sh
+```
+
+Interpretation target:
+
+- A checkpoint must beat V2 in duplicate eval, not just improve online PPO reward.
+- If protected PPO cannot beat V2, the next implementation direction is better search/label quality rather than more PPO scale.
